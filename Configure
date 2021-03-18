@@ -581,6 +581,7 @@ my @disable_cascades = (
                              "srtp", "ssl3-method", "ssl-trace",
                              "tfo",
                              "ts", "ui-console", "whirlpool",
+                             "quic",
                              "fips-securitychecks" ],
     sub { $config{processor} eq "386" }
                         => [ "sse2" ],
@@ -588,7 +589,7 @@ my @disable_cascades = (
     "ssl3-method"       => [ "ssl3" ],
     "zlib"              => [ "zlib-dynamic" ],
     "des"               => [ "mdc2" ],
-    "ec"                => [ "ec2m", "ecdsa", "ecdh", "sm2", "gost" ],
+    "ec"                => [ "ec2m", "ecdsa", "ecdh", "sm2", "gost", "quic" ],
     "dgram"             => [ "dtls", "sctp" ],
     "sock"              => [ "dgram", "tfo" ],
     "dtls"              => [ @dtls ],
