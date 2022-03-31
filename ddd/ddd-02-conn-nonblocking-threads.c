@@ -32,7 +32,7 @@ SSL_CTX *create_ssl_ctx(void)
 {
     SSL_CTX *ctx;
 
-    ctx = SSL_CTX_new(TLS_client_method());
+    ctx = SSL_CTX_new(QUIC_client_thread_method());
     if (ctx == NULL)
         return NULL;
 
@@ -160,7 +160,7 @@ int rx(APP_CONN *conn, void *buf, int buf_len)
  */
 int get_conn_fd(APP_CONN *conn)
 {
-    return BIO_get_fd(conn->ssl_bio, NULL);
+    return BIO_get_poll_fd(conn->ssl_bio, NULL);
 }
 
 /*
@@ -178,7 +178,7 @@ int get_conn_fd(APP_CONN *conn)
  */
 int get_conn_pending_tx(APP_CONN *conn)
 {
-    return (conn->tx_need_rx ? POLLIN : 0) | POLLOUT | POLLERR;
+    return POLLIN | POLLOUT | POLLERR;
 }
 
 int get_conn_pending_rx(APP_CONN *conn)
