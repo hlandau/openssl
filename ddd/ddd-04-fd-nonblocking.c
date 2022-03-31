@@ -27,7 +27,7 @@ SSL_CTX *create_ssl_ctx(void)
 {
     SSL_CTX *ctx;
 
-    ctx = SSL_CTX_new(TLS_client_method());
+    ctx = SSL_CTX_new(QUIC_client_method());
     if (ctx == NULL)
         return NULL;
 
@@ -180,12 +180,32 @@ int get_conn_fd(APP_CONN *conn)
  */
 int get_conn_pending_tx(APP_CONN *conn)
 {
-    return (conn->tx_need_rx ? POLLIN : 0) | POLLOUT | POLLERR;
+    return POLLIN | POLLOUT | POLLERR;
 }
 
 int get_conn_pending_rx(APP_CONN *conn)
 {
     return (conn->rx_need_tx ? POLLOUT : 0) | POLLIN | POLLERR;
+}
+
+/*
+ * Returns the number of milliseconds after which some call to libssl must be
+ * made. Any call (SSL_read/SSL_write/SSL_pump) will do. Returns -1 if there is
+ * no need for such a call. This may change after the next call
+ * to libssl.
+ */
+int get_conn_pump_timeout(APP_CONN *conn)
+{
+    return SSL_get_timeout(conn->ssl);
+}
+
+/*
+ * Called to advance internals of libssl state machines without having to
+ * perform an application-level read/write.
+ */
+void pump(APP_CONN *conn)
+{
+    SSL_pump(conn->ssl);
 }
 
 /*
@@ -216,9 +236,21 @@ void teardown_ctx(SSL_CTX *ctx)
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/signal.h>
+#include <sys/time.h>
 #include <netdb.h>
 #include <unistd.h>
 #include <fcntl.h>
+
+static inline void ms_to_timeval(struct timeval *t, int ms)
+{
+    t->tv_sec   = ms < 0 ? -1 : ms/1000;
+    t->tv_usec  = ms < 0 ? 0 : (ms%1000)*1000;
+}
+
+static inline int timeval_to_ms(const struct timeval *t)
+{
+    return t->tv_sec*1000 + t->tv_usec/1000;
+}
 
 int main(int argc, char **argv)
 {
@@ -227,10 +259,12 @@ int main(int argc, char **argv)
     const char *tx_p = tx_msg;
     char rx_buf[2048];
     int l, tx_len = sizeof(tx_msg)-1;
-    int timeout = 2000 /* ms */;
+    struct timeval timeout;
     APP_CONN *conn = NULL;
     struct addrinfo hints = {0}, *result = NULL;
     SSL_CTX *ctx;
+
+    ms_to_timeval(&timeout, 2000);
 
     ctx = create_ssl_ctx();
     if (ctx == NULL) {
@@ -283,12 +317,25 @@ int main(int argc, char **argv)
             fprintf(stderr, "tx error\n");
             goto fail;
         } else if (l == -2) {
+            struct timeval start, now, deadline, t;
             struct pollfd pfd = {0};
+            ms_to_timeval(&t, get_conn_pump_timeout(conn));
+            if (t.tv_sec < 0 || timercmp(&t, &timeout, >))
+                t = timeout;
+
+            gettimeofday(&start, NULL);
+            timeradd(&start, &timeout, &deadline);
+
             pfd.fd = get_conn_fd(conn);
             pfd.events = get_conn_pending_tx(conn);
-            if (poll(&pfd, 1, timeout) == 0) {
-                fprintf(stderr, "tx timeout\n");
-                goto fail;
+            if (poll(&pfd, 1, timeval_to_ms(&t)) == 0) {
+                pump(conn);
+
+                gettimeofday(&now, NULL);
+                if (timercmp(&now, &deadline, >=)) {
+                    fprintf(stderr, "tx timeout\n");
+                    goto fail;
+                }
             }
         }
     }
@@ -301,12 +348,25 @@ int main(int argc, char **argv)
         } else if (l == -1) {
             break;
         } else if (l == -2) {
+            struct timeval start, now, deadline, t;
             struct pollfd pfd = {0};
+            ms_to_timeval(&t, get_conn_pump_timeout(conn));
+            if (t.tv_sec < 0 || timercmp(&t, &timeout, >))
+                t = timeout;
+
+            gettimeofday(&start, NULL);
+            timeradd(&start, &timeout, &deadline);
+
             pfd.fd = get_conn_fd(conn);
             pfd.events = get_conn_pending_rx(conn);
-            if (poll(&pfd, 1, timeout) == 0) {
-                fprintf(stderr, "rx timeout\n");
-                goto fail;
+            if (poll(&pfd, 1, timeval_to_ms(&t)) == 0) {
+                pump(conn);
+
+                gettimeofday(&now, NULL);
+                if (timercmp(&now, &deadline, >=)) {
+                    fprintf(stderr, "rx timeout\n");
+                    goto fail;
+                }
             }
         }
     }
