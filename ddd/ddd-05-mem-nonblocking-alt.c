@@ -31,7 +31,7 @@ SSL_CTX *create_ssl_ctx(void)
 {
     SSL_CTX *ctx;
 
-    ctx = SSL_CTX_new(TLS_client_method());
+    ctx = SSL_CTX_new(QUIC_client_method());
     if (ctx == NULL)
         return NULL;
 
@@ -71,7 +71,7 @@ APP_CONN *new_conn(SSL_CTX *ctx, const char *bare_hostname)
 
     SSL_set_connect_state(ssl); /* cannot fail */
 
-    if (BIO_new_bio_pair(&internal_bio, 0, &net_bio, 0) <= 0) {
+    if (BIO_new_dgram_pair(&internal_bio, 0, &net_bio, 0) <= 0) {
         SSL_free(ssl);
         free(conn);
         return NULL;
@@ -170,17 +170,29 @@ int rx(APP_CONN *conn, void *buf, int buf_len)
  * Called to get data which has been enqueued for transmission to the network
  * by OpenSSL.
  */
-int read_net_tx(APP_CONN *conn, void *buf, int buf_len)
+int read_net_tx(APP_CONN *conn, void **buf, size_t *buf_len)
 {
-    return BIO_read(conn->net_bio, buf, buf_len);
+    return BIO_get_dgram(conn->net_bio, buf, buf_len);
+}
+
+void done_read_net_tx(APP_CONN *conn, void *buf, size_t buf_len)
+{
+    BIO_return_dgram(conn->net_bio, buf, buf_len);
 }
 
 /*
- * Called to feed data which has been received from the network to OpenSSL.
+ * Called to feed data which has been received from the network to OpenSSL. buf
+ * must contain the entirety of a single frame. It will be consumed entirely
+ * (return value == buf_len) or not at all.
  */
-int write_net_rx(APP_CONN *conn, const void *buf, int buf_len)
+static void free_rx_buf(void *buf, size_t buf_len, void *arg)
 {
-    return BIO_write(conn->net_bio, buf, buf_len);
+    free(buf);
+}
+
+int write_net_rx(APP_CONN *conn, const void *buf, size_t buf_len)
+{
+    return BIO_put_dgram(conn->net_bio, buf, buf_len, free_rx_buf, NULL);
 }
 
 /*
@@ -215,7 +227,7 @@ size_t net_tx_avail(APP_CONN *conn)
  */
 int get_conn_pending_tx(APP_CONN *conn)
 {
-    return (conn->tx_need_rx ? POLLIN : 0) | POLLOUT | POLLERR;
+    return POLLIN | POLLOUT | POLLERR;
 }
 
 int get_conn_pending_rx(APP_CONN *conn)
@@ -259,8 +271,8 @@ void teardown_ctx(SSL_CTX *ctx)
 static int pump(APP_CONN *conn, int fd, int events, int timeout)
 {
     int l, l2;
-    char buf[2048];
-    size_t wspace;
+    void *buf;
+    size_t wspace, buf_len;
     struct pollfd pfd = {0};
 
     pfd.fd = fd;
@@ -278,8 +290,13 @@ static int pump(APP_CONN *conn, int fd, int events, int timeout)
 
     if (pfd.revents & POLLIN) {
         while ((wspace = net_rx_space(conn)) > 0) {
+            buf = malloc(wspace);
+            if (buf == NULL)
+                return -1;
+
             l = read(fd, buf, wspace > sizeof(buf) ? sizeof(buf) : wspace);
             if (l <= 0) {
+                free(buf);
                 switch (errno) {
                     case EAGAIN:
                         goto stop;
@@ -300,10 +317,11 @@ static int pump(APP_CONN *conn, int fd, int events, int timeout)
 
     if (pfd.revents & POLLOUT) {
         for (;;) {
-            l = read_net_tx(conn, buf, sizeof(buf));
+            l = read_net_tx(conn, &buf, &buf_len);
             if (l <= 0)
                 break;
-            l2 = write(fd, buf, l);
+            l2 = write(fd, buf, buf_len);
+            done_read_net_tx(conn, buf, buf_len);
             if (l2 < l)
                 fprintf(stderr, "short read %d %d\n", l2, l);
         }
@@ -341,7 +359,7 @@ int main(int argc, char **argv)
 
     signal(SIGPIPE, SIG_IGN);
 
-    fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (fd < 0) {
         fprintf(stderr, "cannot create socket\n");
         goto fail;
