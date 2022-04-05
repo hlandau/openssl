@@ -11,7 +11,6 @@ typedef void (app_connect_cb)(APP_CONN *conn, int status, void *arg);
 typedef void (app_write_cb)(APP_CONN *conn, int status, void *arg);
 typedef void (app_read_cb)(APP_CONN *conn, void *buf, size_t buf_len, void *arg);
 
-static void tcp_connect_done(uv_connect_t *tcp_connect, int status);
 static void net_connect_fail_close_done(uv_handle_t *handle);
 static int handshake_ssl(APP_CONN *conn);
 static void flush_write_buf(APP_CONN *conn);
@@ -21,6 +20,7 @@ static void handle_pending_writes(APP_CONN *conn);
 static int write_deferred(APP_CONN *conn, const void *buf, size_t buf_len, app_write_cb *cb, void *arg);
 static void teardown_continued(uv_handle_t *handle);
 static int setup_ssl(APP_CONN *conn, const char *hostname);
+static void set_timer(APP_CONN *conn);
 
 /*
  * Structure to track an application-level write request. Only created
@@ -54,8 +54,8 @@ struct app_conn_st {
     SSL            *ssl;
     BIO            *net_bio;
     uv_stream_t    *stream;
-    uv_tcp_t        tcp;
-    uv_connect_t    tcp_connect;
+    uv_udp_t        udp;
+    uv_timer_t      timer;
     app_connect_cb *app_connect_cb;   /* called once handshake is done */
     void           *app_connect_arg;
     app_read_cb    *app_read_cb;      /* application's on-RX callback */
@@ -77,7 +77,7 @@ SSL_CTX *create_ssl_ctx(void)
 {
     SSL_CTX *ctx;
 
-    ctx = SSL_CTX_new(TLS_client_method());
+    ctx = SSL_CTX_new(QUIC_client_method());
     if (ctx == NULL)
         return NULL;
 
@@ -112,21 +112,31 @@ APP_CONN *new_conn(SSL_CTX *ctx, const char *hostname,
     if (!conn)
         return NULL;
 
-    uv_tcp_init(uv_default_loop(), &conn->tcp);
-    conn->tcp.data = conn;
+    uv_udp_init(uv_default_loop(), &conn->udp);
+    conn->udp.data = conn;
 
-    conn->stream            = (uv_stream_t *)&conn->tcp;
+    uv_timer_init(uv_default_loop(), &conn->timer);
+    conn->timer.data = conn;
+
+    conn->stream            = (uv_stream_t *)&conn->udp;
     conn->app_connect_cb    = cb;
     conn->app_connect_arg   = arg;
-    conn->tcp_connect.data  = conn;
-    rc = uv_tcp_connect(&conn->tcp_connect, &conn->tcp, sa, tcp_connect_done);
+    rc = uv_udp_connect(&conn->udp, sa);
     if (rc < 0) {
-        uv_close((uv_handle_t *)&conn->tcp, net_connect_fail_close_done);
+        uv_close((uv_handle_t *)&conn->udp, net_connect_fail_close_done);
         return NULL;
     }
 
     conn->ctx       = ctx;
     conn->hostname  = hostname;
+
+    rc = setup_ssl(conn, hostname);
+    if (rc < 0) {
+        fprintf(stderr, "cannot init SSL\n");
+        uv_close((uv_handle_t *)&conn->udp, net_connect_fail_close_done);
+        return NULL;
+    }
+
     return conn;
 }
 
@@ -167,13 +177,12 @@ void teardown(APP_CONN *conn)
     BIO_free_all(conn->net_bio);
     SSL_free(conn->ssl);
 
-    uv_cancel((uv_req_t *)&conn->tcp_connect);
-
     conn->teardown_done = &teardown_done;
     uv_close((uv_handle_t *)conn->stream, teardown_continued);
+    uv_close((uv_handle_t *)&conn->timer, teardown_continued);
 
     /* Just wait synchronously until teardown completes. */
-    while (!teardown_done)
+    while (teardown_done < 2)
         uv_run(uv_default_loop(), UV_RUN_DEFAULT);
 }
 
@@ -218,6 +227,9 @@ static void dequeue_upper_write_op(APP_CONN *conn)
 static void net_read_alloc(uv_handle_t *handle,
                            size_t suggested_size, uv_buf_t *buf)
 {
+    if (suggested_size < 1472)
+        suggested_size = 1472;
+
     buf->base = malloc(suggested_size);
     buf->len  = suggested_size;
 }
@@ -312,7 +324,7 @@ static void net_read_done(uv_stream_t *stream, ssize_t nr, const uv_buf_t *buf)
 
 static void set_rx(APP_CONN *conn)
 {
-    if (!conn->closed && (conn->app_read_cb || (!conn->done_handshake && conn->init_handshake) || conn->pending_upper_write_head != NULL))
+    if (!conn->closed)
         uv_read_start(conn->stream, net_read_alloc, net_read_done);
     else
         uv_read_stop(conn->stream);
@@ -371,6 +383,7 @@ static void flush_write_buf(APP_CONN *conn)
 
 static void handshake_done_ssl(APP_CONN *conn)
 {
+    set_timer(conn);
     conn->app_connect_cb(conn, 0, conn->app_connect_arg);
 }
 
@@ -410,7 +423,7 @@ static int setup_ssl(APP_CONN *conn, const char *hostname)
 
     SSL_set_connect_state(ssl);
 
-    if (BIO_new_bio_pair(&internal_bio, 0, &net_bio, 0) <= 0) {
+    if (BIO_new_dgram_pair(&internal_bio, 0, &net_bio, 0) <= 0) {
         SSL_free(ssl);
         return -1;
     }
@@ -430,24 +443,6 @@ static int setup_ssl(APP_CONN *conn, const char *hostname)
     conn->net_bio             = net_bio;
     conn->ssl                 = ssl;
     return handshake_ssl(conn);
-}
-
-static void tcp_connect_done(uv_connect_t *tcp_connect, int status)
-{
-    int rc;
-    APP_CONN *conn = (APP_CONN *)tcp_connect->data;
-
-    if (status < 0) {
-        uv_stop(uv_default_loop());
-        return;
-    }
-
-    rc = setup_ssl(conn, conn->hostname);
-    if (rc < 0) {
-        fprintf(stderr, "cannot init SSL\n");
-        uv_stop(uv_default_loop());
-        return;
-    }
 }
 
 static void net_connect_fail_close_done(uv_handle_t *handle)
@@ -504,11 +499,32 @@ static int write_deferred(APP_CONN *conn, const void *buf, size_t buf_len, app_w
     return buf_len;
 }
 
+static void timer_done(uv_timer_t *timer)
+{
+    APP_CONN *conn = (APP_CONN *)timer->data;
+
+    SSL_pump(conn->ssl);
+    handle_pending_writes(conn);
+    flush_write_buf(conn);
+    set_rx(conn);
+    set_timer(conn); /* repeat timer */
+}
+
+static void set_timer(APP_CONN *conn)
+{
+    int ms = SSL_get_timeout(conn->ssl);
+    if (ms > 0)
+        uv_timer_start(&conn->timer, timer_done, ms, 0);
+}
+
 static void teardown_continued(uv_handle_t *handle)
 {
     APP_CONN *conn = (APP_CONN *)handle->data;
     UPPER_WRITE_OP *op, *next_op;
     char *teardown_done = conn->teardown_done;
+
+    if (++*teardown_done < 2)
+        return;
 
     for (op=conn->pending_upper_write_head; op; op=next_op) {
         next_op = op->next;
@@ -516,7 +532,6 @@ static void teardown_continued(uv_handle_t *handle)
     }
 
     free(conn);
-    *teardown_done = 1;
 }
 
 /*
