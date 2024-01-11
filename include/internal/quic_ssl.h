@@ -77,6 +77,7 @@ __owur int ossl_quic_conn_set_initial_peer_addr(SSL *s,
                                                 const BIO_ADDR *peer_addr);
 __owur SSL *ossl_quic_conn_stream_new(SSL *s, uint64_t flags);
 __owur SSL *ossl_quic_get0_connection(SSL *s);
+__owur SSL *ossl_quic_get0_listener(SSL *s);
 __owur int ossl_quic_get_stream_type(SSL *s);
 __owur uint64_t ossl_quic_get_stream_id(SSL *s);
 __owur int ossl_quic_is_stream_local(SSL *s);
@@ -87,6 +88,9 @@ __owur int ossl_quic_set_incoming_stream_policy(SSL *s, int policy,
                                                 uint64_t aec);
 __owur SSL *ossl_quic_accept_stream(SSL *s, uint64_t flags);
 __owur size_t ossl_quic_get_accept_stream_queue_len(SSL *s);
+__owur SSL *ossl_quic_accept_connection(SSL *ssl, uint64_t flags);
+__owur size_t ossl_quic_get_accept_connection_queue_len(SSL *ssl);
+__owur int ossl_quic_listen(SSL *ssl);
 
 __owur int ossl_quic_stream_reset(SSL *ssl,
                                   const SSL_STREAM_RESET_ARGS *args,
