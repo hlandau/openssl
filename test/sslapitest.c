@@ -40,6 +40,7 @@
 #include "testutil/output.h"
 #include "internal/nelem.h"
 #include "internal/ktls.h"
+#include "internal/ssl_unwrap.h"
 #include "../ssl/ssl_local.h"
 #include "../ssl/record/methods/recmethod_local.h"
 #include "filterprov.h"
