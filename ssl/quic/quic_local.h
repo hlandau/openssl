@@ -123,6 +123,9 @@ struct quic_conn_st {
 
     SSL                             *tls;
 
+    /* The QLSO this connection belongs to, if any. */
+    QUIC_LISTENER                   *listener;
+
     /* The QUIC engine representing the QUIC event domain. */
     QUIC_ENGINE                     *engine;
 
