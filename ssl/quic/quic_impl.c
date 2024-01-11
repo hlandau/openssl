@@ -22,8 +22,9 @@
 
 typedef struct qctx_st QCTX;
 
+static void qc_cleanup(QUIC_CONNECTION *qc, int have_lock);
 static void aon_write_finish(QUIC_XSO *xso);
-static int create_channel(QUIC_CONNECTION *qc);
+static int create_channel(QUIC_CONNECTION *qc, SSL_CTX *ctx);
 static QUIC_XSO *create_xso_from_stream(QUIC_CONNECTION *qc, QUIC_STREAM *qs);
 static int qc_try_create_default_xso_for_write(QCTX *ctx);
 static int qc_wait_for_default_xso_for_read(QCTX *ctx);
@@ -379,7 +380,6 @@ static int quic_mutation_allowed(QUIC_CONNECTION *qc, int req_active)
 SSL *ossl_quic_new(SSL_CTX *ctx)
 {
     QUIC_CONNECTION *qc = NULL;
-    SSL *ssl_base = NULL;
     SSL_CONNECTION *sc = NULL;
 
     qc = OPENSSL_zalloc(sizeof(*qc));
@@ -387,6 +387,8 @@ SSL *ossl_quic_new(SSL_CTX *ctx)
         QUIC_RAISE_NON_NORMAL_ERROR(NULL, ERR_R_CRYPTO_LIB, NULL);
         return NULL;
     }
+
+    /* Create the QUIC domain mutex. */
 #if defined(OPENSSL_THREADS)
     if ((qc->mutex = ossl_crypto_mutex_new()) == NULL) {
         QUIC_RAISE_NON_NORMAL_ERROR(NULL, ERR_R_CRYPTO_LIB, NULL);
@@ -394,14 +396,7 @@ SSL *ossl_quic_new(SSL_CTX *ctx)
     }
 #endif
 
-    /* Initialise the QUIC_CONNECTION's stub header. */
-    ssl_base = &qc->ssl;
-    if (!ossl_ssl_init(ssl_base, ctx, ctx->method, SSL_TYPE_QUIC_CONNECTION)) {
-        ssl_base = NULL;
-        QUIC_RAISE_NON_NORMAL_ERROR(NULL, ERR_R_INTERNAL_ERROR, NULL);
-        goto err;
-    }
-
+    /* Create the handshake layer. */
     qc->tls = ossl_ssl_connection_new_int(ctx, TLS_method());
     if (qc->tls == NULL || (sc = SSL_CONNECTION_FROM_SSL(qc->tls)) == NULL) {
         QUIC_RAISE_NON_NORMAL_ERROR(NULL, ERR_R_INTERNAL_ERROR, NULL);
@@ -415,27 +410,36 @@ SSL *ossl_quic_new(SSL_CTX *ctx)
     sc->options &= OSSL_QUIC_PERMITTED_OPTIONS_CONN;
     sc->pha_enabled = 0;
 
+    /* Determine mode of operation. */
 #if !defined(OPENSSL_NO_QUIC_THREAD_ASSIST)
     qc->is_thread_assisted
-        = (ssl_base->method == OSSL_QUIC_client_thread_method());
+        = (ctx->method == OSSL_QUIC_client_thread_method());
 #endif
 
     qc->as_server       = 0; /* TODO(QUIC SERVER): add server support */
     qc->as_server_state = qc->as_server;
 
+    if (!create_channel(qc, ctx))
+        goto err;
+
+    ossl_quic_channel_set_msg_callback(qc->ch, ctx->msg_callback, &qc->obj.ssl);
+    ossl_quic_channel_set_msg_callback_arg(qc->ch, ctx->msg_callback_arg);
+
+    /* Initialise the QUIC_CONNECTION's QUIC_OBJ base. */
+    if (!ossl_quic_obj_init(&qc->obj, ctx, SSL_TYPE_QUIC_CONNECTION, NULL,
+                            qc->engine, qc->port)) {
+        QUIC_RAISE_NON_NORMAL_ERROR(NULL, ERR_R_INTERNAL_ERROR, NULL);
+        goto err;
+    }
+
+    /* Initialise libssl APL-related state. */
     qc->default_stream_mode     = SSL_DEFAULT_STREAM_MODE_AUTO_BIDI;
-    qc->default_ssl_mode        = qc->ssl.ctx->mode;
-    qc->default_ssl_options     = qc->ssl.ctx->options & OSSL_QUIC_PERMITTED_OPTIONS;
+    qc->default_ssl_mode        = qc->obj.ssl.ctx->mode;
+    qc->default_ssl_options     = qc->obj.ssl.ctx->options & OSSL_QUIC_PERMITTED_OPTIONS;
     qc->desires_blocking        = 1;
     qc->blocking                = 0;
     qc->incoming_stream_policy  = SSL_INCOMING_STREAM_POLICY_AUTO;
     qc->last_error              = SSL_ERROR_NONE;
-
-    if (!create_channel(qc))
-        goto err;
-
-    ossl_quic_channel_set_msg_callback(qc->ch, ctx->msg_callback, ssl_base);
-    ossl_quic_channel_set_msg_callback_arg(qc->ch, ctx->msg_callback_arg);
 
     qc_update_reject_policy(qc);
 
@@ -449,18 +453,43 @@ SSL *ossl_quic_new(SSL_CTX *ctx)
      * we take that as a cue that the client is expecting a server-initiated
      * stream, and vice versa if SSL_write() is called first.
      */
-    return ssl_base;
+    return &qc->obj.ssl;
 
 err:
-    if (ssl_base == NULL) {
-#if defined(OPENSSL_THREADS)
-        ossl_crypto_mutex_free(qc->mutex);
-#endif
+    if (qc != NULL) {
+        qc_cleanup(qc, /*have_lock=*/0);
         OPENSSL_free(qc);
-    } else {
-        SSL_free(ssl_base);
     }
     return NULL;
+}
+
+QUIC_NEEDS_LOCK
+static void qc_cleanup(QUIC_CONNECTION *qc, int have_lock)
+{
+    ossl_quic_channel_free(qc->ch);
+    qc->ch = NULL;
+
+    ossl_quic_port_free(qc->port);
+    qc->port = NULL;
+
+    ossl_quic_engine_free(qc->engine);
+    qc->engine = NULL;
+
+    BIO_free_all(qc->net_rbio);
+    qc->net_rbio = NULL;
+
+    BIO_free_all(qc->net_wbio);
+    qc->net_wbio = NULL;
+
+    SSL_free(qc->tls);
+    qc->tls = NULL;
+
+    if (have_lock)
+        quic_unlock(qc); /* tsan doesn't like freeing locked mutexes */
+
+#if defined(OPENSSL_THREADS)
+    ossl_crypto_mutex_free(&qc->mutex);
+#endif
 }
 
 /* SSL_free */
@@ -516,7 +545,7 @@ void ossl_quic_free(SSL *s)
          * so don't call SSL_free(qc) as we are already in it.
          */
         if (!is_default)
-            SSL_free(&ctx.qc->ssl);
+            SSL_free(&ctx.qc->obj.ssl);
 
         /* Note: SSL_free calls OPENSSL_free(xso) for us */
         return;
@@ -530,7 +559,7 @@ void ossl_quic_free(SSL *s)
         QUIC_XSO *xso = ctx.qc->default_xso;
 
         quic_unlock(ctx.qc);
-        SSL_free(&xso->ssl);
+        SSL_free(&xso->obj.ssl);
         quic_lock(ctx.qc);
         ctx.qc->default_xso = NULL;
     }
@@ -545,20 +574,9 @@ void ossl_quic_free(SSL *s)
     }
 #endif
 
-    ossl_quic_channel_free(ctx.qc->ch);
-    ossl_quic_port_free(ctx.qc->port);
-    ossl_quic_engine_free(ctx.qc->engine);
-
-    BIO_free_all(ctx.qc->net_rbio);
-    BIO_free_all(ctx.qc->net_wbio);
+    qc_cleanup(ctx.qc, /*have_lock=*/1);
 
     /* Note: SSL_free calls OPENSSL_free(qc) for us */
-
-    SSL_free(ctx.qc->tls);
-    quic_unlock(ctx.qc); /* tsan doesn't like freeing locked mutexes */
-#if defined(OPENSSL_THREADS)
-    ossl_crypto_mutex_free(&ctx.qc->mutex);
-#endif
 }
 
 /* SSL method init */
@@ -659,7 +677,7 @@ static void qc_set_default_xso_keep_ref(QUIC_CONNECTION *qc, QUIC_XSO *xso,
              * Changing to not having a default XSO. XSO becomes standalone and
              * now has a ref to the QC.
              */
-            if (!ossl_assert(SSL_up_ref(&qc->ssl)))
+            if (!ossl_assert(SSL_up_ref(&qc->obj.ssl)))
                 return;
         } else {
             /*
@@ -673,7 +691,7 @@ static void qc_set_default_xso_keep_ref(QUIC_CONNECTION *qc, QUIC_XSO *xso,
              */
             assert(*old_xso == NULL);
 
-            CRYPTO_DOWN_REF(&qc->ssl.references, &refs);
+            CRYPTO_DOWN_REF(&qc->obj.ssl.references, &refs);
             assert(refs > 0);
         }
     }
@@ -694,7 +712,7 @@ static void qc_set_default_xso(QUIC_CONNECTION *qc, QUIC_XSO *xso, int touch)
     qc_set_default_xso_keep_ref(qc, xso, touch, &old_xso);
 
     if (old_xso != NULL)
-        SSL_free(&old_xso->ssl);
+        SSL_free(&old_xso->obj.ssl);
 }
 
 QUIC_NEEDS_LOCK
@@ -1410,7 +1428,7 @@ long ossl_quic_ctrl(SSL *s, int cmd, long larg, void *parg)
          * supported by anything, the handshake layer's ctrl method will finally
          * return 0.
          */
-        return ossl_ctrl_internal(&ctx.qc->ssl, cmd, larg, parg, /*no_quic=*/1);
+        return ossl_ctrl_internal(&ctx.qc->obj.ssl, cmd, larg, parg, /*no_quic=*/1);
     }
 }
 
@@ -1490,13 +1508,13 @@ static int configure_channel(QUIC_CONNECTION *qc)
 }
 
 QUIC_NEEDS_LOCK
-static int create_channel(QUIC_CONNECTION *qc)
+static int create_channel(QUIC_CONNECTION *qc, SSL_CTX *ctx)
 {
     QUIC_ENGINE_ARGS engine_args = {0};
     QUIC_PORT_ARGS port_args = {0};
 
-    engine_args.libctx        = qc->ssl.ctx->libctx;
-    engine_args.propq         = qc->ssl.ctx->propq;
+    engine_args.libctx        = ctx->libctx;
+    engine_args.propq         = ctx->propq;
     engine_args.mutex         = qc->mutex;
     engine_args.now_cb        = get_time_cb;
     engine_args.now_cb_arg    = qc;
@@ -1506,7 +1524,7 @@ static int create_channel(QUIC_CONNECTION *qc)
         return 0;
     }
 
-    port_args.channel_ctx = qc->ssl.ctx;
+    port_args.channel_ctx = ctx;
     qc->port = ossl_quic_engine_create_port(qc->engine, &port_args);
     if (qc->port == NULL) {
         QUIC_RAISE_NON_NORMAL_ERROR(NULL, ERR_R_INTERNAL_ERROR, NULL);
@@ -1937,13 +1955,14 @@ static QUIC_XSO *create_xso_from_stream(QUIC_CONNECTION *qc, QUIC_STREAM *qs)
         goto err;
     }
 
-    if (!ossl_ssl_init(&xso->ssl, qc->ssl.ctx, qc->ssl.method, SSL_TYPE_QUIC_XSO)) {
+    if (!ossl_quic_obj_init(&xso->obj, qc->obj.ssl.ctx, SSL_TYPE_QUIC_XSO,
+                            &qc->obj.ssl, NULL, NULL)) {
         QUIC_RAISE_NON_NORMAL_ERROR(NULL, ERR_R_INTERNAL_ERROR, NULL);
         goto err;
     }
 
     /* XSO refs QC */
-    if (!SSL_up_ref(&qc->ssl)) {
+    if (!SSL_up_ref(&qc->obj.ssl)) {
         QUIC_RAISE_NON_NORMAL_ERROR(NULL, ERR_R_SSL_LIB, NULL);
         goto err;
     }
@@ -2044,7 +2063,7 @@ static SSL *quic_conn_stream_new(QCTX *ctx, uint64_t flags, int need_lock)
     if (need_lock)
         quic_unlock(qc);
 
-    return &xso->ssl;
+    return &xso->obj.ssl;
 
 err:
     OPENSSL_free(xso);
@@ -2919,7 +2938,7 @@ SSL *ossl_quic_get0_connection(SSL *s)
     if (!expect_quic(s, &ctx))
         return NULL;
 
-    return &ctx.qc->ssl;
+    return &ctx.qc->obj.ssl;
 }
 
 /*
@@ -3052,7 +3071,7 @@ SSL *ossl_quic_detach_stream(SSL *s)
 
     quic_unlock(ctx.qc);
 
-    return xso != NULL ? &xso->ssl : NULL;
+    return xso != NULL ? &xso->obj.ssl : NULL;
 }
 
 /*
@@ -3087,7 +3106,7 @@ int ossl_quic_attach_stream(SSL *conn, SSL *stream)
      * It is a caller error for the XSO being attached as a default XSO to have
      * more than one ref.
      */
-    if (!CRYPTO_GET_REF(&xso->ssl.references, &nref)) {
+    if (!CRYPTO_GET_REF(&xso->obj.ssl.references, &nref)) {
         quic_unlock(ctx.qc);
         return QUIC_RAISE_NON_NORMAL_ERROR(&ctx, ERR_R_INTERNAL_ERROR,
                                        "ref");
@@ -3253,7 +3272,7 @@ SSL *ossl_quic_accept_stream(SSL *s, uint64_t flags)
     ossl_statm_get_rtt_info(ossl_quic_channel_get_statm(ctx.qc->ch), &rtt_info);
     ossl_quic_stream_map_remove_from_accept_queue(qsm, qs,
                                                   rtt_info.smoothed_rtt);
-    new_s = &xso->ssl;
+    new_s = &xso->obj.ssl;
 
     /* Calling this function inhibits default XSO autocreation. */
     qc_touch_default_xso(ctx.qc); /* inhibits default XSO */
@@ -3593,7 +3612,7 @@ long ossl_quic_callback_ctrl(SSL *s, int cmd, void (*fp) (void))
     switch (cmd) {
     case SSL_CTRL_SET_MSG_CALLBACK:
         ossl_quic_channel_set_msg_callback(ctx.qc->ch, (ossl_msg_cb)fp,
-                                           &ctx.qc->ssl);
+                                           &ctx.qc->obj.ssl);
         /* This callback also needs to be set on the internal SSL object */
         return ssl3_callback_ctrl(ctx.qc->tls, cmd, fp);;
 
