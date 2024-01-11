@@ -157,9 +157,6 @@ struct quic_conn_st {
      */
     QUIC_XSO                        *default_xso;
 
-    /* The network read and write BIOs. */
-    BIO                             *net_rbio, *net_wbio;
-
     /* Initial peer L4 address. */
     BIO_ADDR                        init_peer_addr;
 
@@ -209,13 +206,6 @@ struct quic_conn_st {
      */
     unsigned int                    shutting_down           : 1;
 
-    /* Have we probed the BIOs for addressing support? */
-    unsigned int                    addressing_probe_done   : 1;
-
-    /* Are we using addressed mode (BIO_sendmmsg with non-NULL peer)? */
-    unsigned int                    addressed_mode_w        : 1;
-    unsigned int                    addressed_mode_r        : 1;
-
     /* Default stream type. Defaults to SSL_DEFAULT_STREAM_MODE_AUTO_BIDI. */
     uint32_t                        default_stream_mode;
 
@@ -228,6 +218,11 @@ struct quic_conn_st {
     /* SSL_set_incoming_stream_policy. */
     int                             incoming_stream_policy;
     uint64_t                        incoming_stream_aec;
+
+    /*
+     * Last network BIO epoch at which blocking mode compatibility was checked.
+     */
+    uint64_t                        last_net_bio_epoch;
 
     /*
      * Last 'normal' error during an app-level I/O operation, used by
@@ -256,6 +251,9 @@ struct quic_listener_st {
      * provide it to the engine.
      */
     CRYPTO_MUTEX                    *mutex;
+
+    /* Have we started listening yet? */
+    unsigned int                    listening               : 1;
 };
 
 /* Internal calls to the QUIC CSM which come from various places. */
