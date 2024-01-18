@@ -669,6 +669,7 @@ SSL_STREAM_STATE_FINISHED               define
 SSL_STREAM_STATE_RESET_LOCAL            define
 SSL_STREAM_STATE_RESET_REMOTE           define
 SSL_STREAM_STATE_CONN_CLOSED            define
+SSL_ACCEPT_CONNECTION_NO_BLOCK          define
 SSL_ACCEPT_STREAM_NO_BLOCK              define
 SSL_DEFAULT_STREAM_MODE_AUTO_BIDI       define
 SSL_DEFAULT_STREAM_MODE_AUTO_UNI        define
@@ -677,6 +678,7 @@ SSL_INCOMING_STREAM_POLICY_ACCEPT       define
 SSL_INCOMING_STREAM_POLICY_AUTO         define
 SSL_INCOMING_STREAM_POLICY_REJECT       define
 SSL_WRITE_FLAG_CONCLUDE                 define
+SSL_LISTENER_FLAG_NO_ACCEPT             define
 TLS_DEFAULT_CIPHERSUITES                define deprecated 3.0.0
 X509_CRL_http_nbio                      define deprecated 3.0.0
 X509_http_nbio                          define deprecated 3.0.0
