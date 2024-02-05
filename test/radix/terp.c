@@ -141,6 +141,11 @@ enum {
     OPK_INVALID,
     OPK_END,
     OPK_PUSH_P,
+    /*
+     * This is exactly like PUSH_P, but the script dumper knows the pointer
+     * points to a static NUL-terminated string and can therefore print it.
+     */
+    OPK_PUSH_PZ,
     OPK_PUSH_U64,
     OPK_PUSH_LREF,
     //OPK_SELECT_OBJ,
@@ -171,9 +176,15 @@ static void opgen_END(GEN_CTX *ctx)
     openc_opcode(ctx, OPK_END);
 }
 
-static void opgen_PUSH_P(GEN_CTX *ctx, void *p)
+static ossl_unused void opgen_PUSH_P(GEN_CTX *ctx, void *p)
 {
     openc_opcode(ctx, OPK_PUSH_P);
+    openc_p(ctx, p);
+}
+
+static void opgen_PUSH_PZ(GEN_CTX *ctx, void *p)
+{
+    openc_opcode(ctx, OPK_PUSH_PZ);
     openc_p(ctx, p);
 }
 
@@ -219,6 +230,7 @@ static ossl_unused void opgen_fail(GEN_CTX *ctx, const char *msg)
                          opgen_##n)
 #define OP_END()        OPGEN(END)      (ctx)
 #define OP_PUSH_P(v)    OPGEN(PUSH_P)   (ctx, (v))
+#define OP_PUSH_PZ(v)   OPGEN(PUSH_PZ)  (ctx, (v))
 #define OP_PUSH_U64(v)  OPGEN(PUSH_U64) (ctx, (v))
 #define OP_PUSH_BUF(v)  OP_PUSH_P(v); OP_PUSH_U64(sizeof(v))
 #define OP_PUSH_LREF(v) OPGEN(PUSH_LREF)(ctx, (lref))
@@ -384,6 +396,18 @@ static int SRDR_print_one(SRDR *srdr, BIO *bio, size_t i, int *was_end)
             BIO_printf(bio, "%20p", v);
         }
         break;
+    case OPK_PUSH_PZ:
+        {
+            void *v;
+
+            GET_OPERAND(srdr, v);
+            PRINT_OPC(PUSH_P);
+            if (v != NULL && strlen((const char *)v) == 1)
+                BIO_printf(bio, "%20p (%s)", v, (const char *)v);
+            else
+                BIO_printf(bio, "%20p (\"%s\")", v, (const char *)v);
+        }
+        break;
     case OPK_PUSH_U64:
         {
             uint64_t v;
@@ -488,7 +512,7 @@ typedef struct terp_config_st {
     OSSL_TIME   (*now_cb)(void *arg);
     void        *now_cb_arg;
 
-    void        (*per_op_cb)(TERP *terp, void *arg);
+    int         (*per_op_cb)(TERP *terp, void *arg);
     void        *per_op_cb_arg;
 
     OSSL_TIME   max_execution_time; /* duration */
@@ -658,12 +682,18 @@ spin_again:
         }
 
         if (terp->cfg.per_op_cb != NULL)
-            terp->cfg.per_op_cb(terp, terp->cfg.per_op_cb_arg);
+            if (!TEST_true(terp->cfg.per_op_cb(terp, terp->cfg.per_op_cb_arg))) {
+                TEST_error("pre-operation processing failed at op %zu", op_num);
+                if (terp->log_execute)
+                    TERP_log_spin(terp, spin_count);
+                goto err;
+            }
 
         switch (opc) {
         case OPK_END:
             goto stop;
         case OPK_PUSH_P:
+        case OPK_PUSH_PZ:
             {
                 void *v;
 
