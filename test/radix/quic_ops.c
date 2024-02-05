@@ -219,6 +219,51 @@ err:
     return ok;
 }
 
+DEF_FUNC(hf_accept_conn)
+{
+    int ok = 0;
+    const char *conn_name;
+    uint64_t flags;
+    SSL *listener, *conn;
+
+    F_POP2(conn_name, flags);
+    REQUIRE_SSL(listener);
+
+    if (!TEST_ptr_null(RADIX_PROCESS_get_obj(RP(), conn_name)))
+        goto err;
+
+    conn = SSL_accept_connection(listener, flags);
+    if (conn == NULL)
+        F_SPIN_AGAIN();
+
+    if (!TEST_true(RADIX_PROCESS_set_ssl(RP(), conn_name, conn))) {
+        SSL_free(conn);
+        goto err;
+    }
+
+    ok = 1;
+err:
+    return ok;
+}
+
+DEF_FUNC(hf_accept_conn_none)
+{
+    int ok = 0;
+    SSL *listener, *conn;
+
+    REQUIRE_SSL(listener);
+
+    conn = SSL_accept_connection(listener, 0);
+    if (!TEST_ptr_null(conn)) {
+        SSL_free(conn);
+        goto err;
+    }
+
+    ok = 1;
+err:
+    return ok;
+}
+
 DEF_FUNC(hf_accept_stream_none)
 {
     int ok = 0;
@@ -443,7 +488,7 @@ DEF_FUNC(hf_read_expect)
     int ok = 0, r;
     SSL *ssl;
     const void *buf;
-    size_t buf_len, bytes_read = 0;
+    uint64_t buf_len, bytes_read = 0;
 
     F_POP2(buf, buf_len);
     REQUIRE_SSL(ssl);
@@ -455,6 +500,7 @@ DEF_FUNC(hf_read_expect)
     r = SSL_read_ex(ssl, RT()->tmp_buf + RT()->tmp_buf_offset,
                     buf_len - RT()->tmp_buf_offset,
                     &bytes_read);
+    if (bytes_read)fprintf(stderr, "# br=%zu\n", bytes_read);
     if (!TEST_true(check_consistent_want(ssl, r)))
         goto err;
 
@@ -846,9 +892,16 @@ err:
 #define OP_ACCEPT_STREAM_WAIT(conn_name, stream_name, flags) \
     OP_PUSH_P(conn_name) OP_PUSH_P(stream_name) \
     OP_PUSH_U64(flags) OP_PUSH_U64(1) OP_FUNC(hf_new_stream)
-#define OP_ACCEPT_STREAM_NONE(conn_name, flags) \
+#define OP_ACCEPT_STREAM_NONE(conn_name) \
     OP_FUNC(hf_accept_stream_none)
-
+#define OP_ACCEPT_CONN_WAIT(listener_name, conn_name, flags) \
+    OP_SELECT_SSL(0, listener_name); \
+    OP_PUSH_PZ(#conn_name); \
+    OP_PUSH_U64(flags); \
+    OP_FUNC(hf_accept_conn)
+#define OP_ACCEPT_CONN_NONE(listener_name) \
+    OP_SELECT_SSL(0, listener_name); \
+    OP_FUNC(hf_accept_conn_none)
 #define OP_STREAM_RESET(error_code) \
     OP_PUSH_U64(flags) OP_FUNC(hf_stream_reset)
 #define OP_SET_DEFAULT_STREAM_MODE(mode) \
@@ -871,10 +924,13 @@ err:
 #define OP_WRITE_B(name, buf)   OP_WRITE(name, (buf), sizeof(buf))
 #define OP_WRITE_FAIL() \
     OP_FUNC(hf_write_fail)
-#define OP_READ_EXPECT(buf, buf_len) \
-    OP_PUSH_P(buf) OP_PUSH_U64(buf_len) OP_FUNC(hf_read_expect)
-#define OP_READ_EXPECT_B(buf) \
-    OP_READ_EXPECT((buf), sizeof(buf))
+#define OP_READ_EXPECT(name, buf, buf_len) \
+    OP_SELECT_SSL(0, name); \
+    OP_PUSH_P(buf);         \
+    OP_PUSH_U64(buf_len);   \
+    OP_FUNC(hf_read_expect)
+#define OP_READ_EXPECT_B(name, buf) \
+    OP_READ_EXPECT(name, (buf), sizeof(buf))
 #define OP_READ_FAIL() \
     OP_PUSH_U64(0) OP_FUNC(hf_read_fail)
 #define OP_READ_FAIL_WAIT() \

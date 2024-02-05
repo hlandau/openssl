@@ -16,6 +16,12 @@ DEF_SCRIPT(simple_conn, "simple connection to server")
 {
     OP_SIMPLE_PAIR_CONN();
     OP_WRITE_B(C, "apple");
+
+    OP_ACCEPT_CONN_WAIT(L, La, 0);
+    OP_ACCEPT_CONN_NONE(L);
+
+    OP_WRITE_B(La, "orange");
+    OP_READ_EXPECT_B(C, "orange");
 }
 
 /*

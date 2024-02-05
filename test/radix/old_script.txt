@@ -1,0 +1,58 @@
+#if 0
+static int some_helper(FUNC_CTX *fctx)
+{
+    int ok;
+    const char *buf = NULL;
+    size_t buf_len = 0;
+
+    F_POP2(buf, buf_len);
+
+    TEST_info("some_helper: %p(%s) %p", (char*)buf, (char *)buf, (void*)buf_len);
+
+    F_POP2(buf, buf_len);
+
+    TEST_info("some_helper: %p(%s) %p", (char*)buf, (char *)buf, (void*)buf_len);
+    ok = 1;
+err:
+    return ok;
+}
+
+DEF_FUNC(hf_sleep) {
+    int ok = 0;
+    sleep(1);
+    F_SPIN_AGAIN();
+    ok = 1;
+err:
+    return ok;
+}
+
+DEF_FUNC(push_error) {
+    ERR_raise_data(ERR_LIB_SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED, "oh no, don't call this");
+    ERR_raise_data(ERR_LIB_SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED, "no really");
+    return 0;
+}
+
+DEF_SCRIPT(err_test, "error test")
+{
+    OP_FUNC(push_error);
+}
+
+DEF_SCRIPT(simple_conn, "simple connection to server")
+{
+    OP_PUSH_BUF("apple");
+    OP_LABEL("1");
+    OP_PUSH_BUF("orange");
+    OP_FUNC(some_helper);
+    OP_FUNC(hf_sleep);
+}
+
+DEF_SCRIPT(simple_thread_child, "threaded test (child)")
+{
+}
+
+DEF_SCRIPT(simple_thread, "threaded test")
+{
+    OP_SPAWN_THREAD(simple_thread_child);
+    OP_SPAWN_THREAD(simple_thread_child);
+}
+#endif

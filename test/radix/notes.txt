@@ -1,0 +1,13 @@
+Scripted Test Executive
+Scripted Network Test Executive SNTX
+Scripted Network Test Interpreter SNTI
+
+TERP        Script interpreter framework - Test Environment inteRPreter
+RADIX-6D    QUIC test framework, built on TERP
+QUIC Tests  Built on RADIX-6D
+
+quic_radix/
+    terp.c              TERP
+    quic_framework.c    QUIC RADIX framework
+    quic_ops.c          QUIC RADIX ops
+    quic_tests.c        quic_radix_test
