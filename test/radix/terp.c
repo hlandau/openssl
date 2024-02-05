@@ -525,7 +525,7 @@ struct terp_st {
     const SCRIPT_INFO   *script_info;
     const GEN_SCRIPT    *gen_script;
     SRDR                srdr;
-    uint8_t             *stk_beg, *stk_cur, *stk_end;
+    uint8_t             *stk_beg, *stk_cur, *stk_end, *stk_save_cur;
     FUNC_CTX            fctx;
     uint64_t            ops_executed;
     int                 log_execute;
@@ -549,6 +549,7 @@ static int TERP_init(TERP *terp,
     terp->stk_beg           = NULL;
     terp->stk_cur           = NULL;
     terp->stk_end           = NULL;
+    terp->stk_save_cur      = NULL;
     terp->ops_executed      = 0;
     terp->log_execute       = 1;
 
@@ -603,8 +604,10 @@ static ossl_inline int TERP_stk_push(TERP *terp,
 static ossl_inline int TERP_stk_pop(TERP *terp,
                                     void *buf, size_t buf_len)
 {
-    if (!TEST_size_t_ge(terp->stk_end - terp->stk_cur, buf_len))
+    if (!TEST_size_t_ge(terp->stk_end - terp->stk_cur, buf_len)) {
+        asm("int3");
         return 0;
+    }
 
     memcpy(buf, terp->stk_cur, buf_len);
     terp->stk_cur += buf_len;
@@ -620,7 +623,13 @@ static void TERP_print_stack(TERP *terp, BIO *bio, const char *header)
 
 #define TERP_GET_OPERAND(v) GET_OPERAND(&terp->srdr, (v))
 
-#define TERP_SPIN_AGAIN() do { SRDR_restore(&terp->srdr); ++spin_count; goto spin_again; } while (0)
+#define TERP_SPIN_AGAIN()                       \
+    do {                                        \
+        SRDR_restore(&terp->srdr);              \
+        terp->stk_cur = terp->stk_save_cur;     \
+        ++spin_count;                           \
+        goto spin_again;                        \
+    } while (0)
 
 static OSSL_TIME TERP_now(TERP *terp)
 {
@@ -669,6 +678,7 @@ static int TERP_execute(TERP *terp)
         TERP_GET_OPERAND(opc);
         ++op_num;
         SRDR_save(&terp->srdr);
+        terp->stk_save_cur = terp->stk_cur;
         spin_count = 0;
 
         ++terp->ops_executed;
