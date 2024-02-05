@@ -48,9 +48,13 @@ int setup_tests(void)
         return 0;
     }
 
-    if (!TEST_ptr(cert_file = test_get_argument(0))
-        || !TEST_ptr(key_file = test_get_argument(1)))
-        return 0;
+    cert_file = test_get_argument(0);
+    if (cert_file == NULL)
+        cert_file = "test/certs/servercert.pem";
+
+    key_file = test_get_argument(1);
+    if (key_file == NULL)
+        key_file = "test/certs/serverkey.pem";
 
     ADD_ALL_TESTS(test_script, OSSL_NELEM(scripts));
     return 1;
