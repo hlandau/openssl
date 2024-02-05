@@ -544,17 +544,18 @@ static void qc_cleanup(QUIC_CONNECTION *qc, int have_lock)
         quic_unref_port_bios(qc->port);
         ossl_quic_port_free(qc->port);
         qc->port = NULL;
-    }
 
-    ossl_quic_engine_free(qc->engine);
-    qc->engine = NULL;
+        ossl_quic_engine_free(qc->engine);
+        qc->engine = NULL;
+    }
 
     if (have_lock)
         /* tsan doesn't like freeing locked mutexes */
         ossl_crypto_mutex_unlock(qc->mutex);
 
 #if defined(OPENSSL_THREADS)
-    ossl_crypto_mutex_free(&qc->mutex);
+    if (qc->listener == NULL)
+        ossl_crypto_mutex_free(&qc->mutex);
 #endif
 }
 
@@ -656,6 +657,10 @@ void ossl_quic_free(SSL *s)
 #endif
 
     qc_cleanup(ctx.qc, /*have_lock=*/1);
+
+    if (ctx.qc->listener != NULL)
+        SSL_free(&ctx.qc->listener->obj.ssl);
+
     /* Note: SSL_free calls OPENSSL_free(qc) for us */
 }
 
@@ -3859,8 +3864,14 @@ static QUIC_CONNECTION *create_qc_from_incoming_conn(QUIC_LISTENER *ql, QUIC_CHA
 {
     QUIC_CONNECTION *qc = NULL;
 
+    if (!SSL_up_ref(&ql->obj.ssl)) {
+        QUIC_RAISE_NON_NORMAL_ERROR(NULL, ERR_R_INTERNAL_ERROR, NULL);
+        goto err;
+    }
+
     if ((qc = OPENSSL_zalloc(sizeof(*qc))) == NULL) {
         QUIC_RAISE_NON_NORMAL_ERROR(NULL, ERR_R_CRYPTO_LIB, NULL);
+        SSL_free(&ql->obj.ssl);
         goto err;
     }
 
@@ -3868,6 +3879,7 @@ static QUIC_CONNECTION *create_qc_from_incoming_conn(QUIC_LISTENER *ql, QUIC_CHA
                             SSL_TYPE_QUIC_CONNECTION,
                             &ql->obj.ssl, NULL, NULL)) {
         QUIC_RAISE_NON_NORMAL_ERROR(NULL, ERR_R_INTERNAL_ERROR, NULL);
+        SSL_free(&ql->obj.ssl);
         goto err;
     }
 
