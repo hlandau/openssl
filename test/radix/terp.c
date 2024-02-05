@@ -70,11 +70,19 @@ static void GEN_CTX_cleanup(GEN_CTX *ctx)
 typedef struct terp_st TERP;
 
 #define F_RET_SPIN_AGAIN        2
+#define F_RET_SKIP_REST         3
 
 #define F_SPIN_AGAIN()                          \
     do {                                        \
         ok                  = F_RET_SPIN_AGAIN; \
         fctx->spin_again    = 1;                \
+        goto err;                               \
+    } while (0)
+
+#define F_SKIP_REST()                           \
+    do {                                        \
+        ok                  = F_RET_SKIP_REST;  \
+        fctx->skip_rest     = 1;                \
         goto err;                               \
     } while (0)
 
@@ -86,6 +94,11 @@ typedef struct func_ctx_st {
      * Cleared automatically after the user function returns.
      */
     int     spin_again;
+
+    /*
+     * Immediately exit script successfully. Useful for skipping.
+     */
+    int     skip_rest;
 } FUNC_CTX;
 
 static ossl_inline int TERP_stk_pop(TERP *terp,
@@ -115,7 +128,7 @@ static ossl_inline int TERP_stk_pop(TERP *terp,
 
 typedef int (*helper_func_t)(FUNC_CTX *fctx);
 
-#define DEF_FUNC(name) static int name(FUNC_CTX *fctx)
+#define DEF_FUNC(name) ossl_unused static int name(FUNC_CTX *fctx)
 
 #define DEF_SCRIPT(name, desc)                          \
     static void script_gen_##name(GEN_CTX *ctx);        \
@@ -477,6 +490,7 @@ static int TERP_init(TERP *terp,
     terp->gen_script        = gen_script;
     terp->fctx.terp         = terp;
     terp->fctx.spin_again   = 0;
+    terp->fctx.skip_rest    = 0;
     terp->stk_beg           = NULL;
     terp->stk_cur           = NULL;
     terp->stk_end           = NULL;
@@ -624,7 +638,13 @@ spin_again:
 
                 ret = v(&terp->fctx);
 
-                if (terp->fctx.spin_again) {
+                if (terp->fctx.skip_rest) {
+                    if (!TEST_int_eq(ret, F_RET_SKIP_REST))
+                        goto err;
+
+                    terp->fctx.skip_rest = 0;
+                    goto stop;
+                } else if (terp->fctx.spin_again) {
                     if (!TEST_int_eq(ret, F_RET_SPIN_AGAIN))
                         goto err;
 

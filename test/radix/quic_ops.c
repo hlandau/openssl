@@ -98,13 +98,9 @@ err:
 
 DEF_FUNC(hf_pop_err)
 {
-    int ok = 0;
-
     ERR_pop();
 
-    ok = 1;
-err:
-    return ok;
+    return 1;
 }
 
 DEF_FUNC(hf_stream_reset)
@@ -306,16 +302,31 @@ DEF_FUNC(hf_read_expect)
     F_POP2(buf, buf_len);
     REQUIRE_SSL(ssl);
 
-/* TODO: TMP BUF */
-#if 0
-    r = SSL_read_ex(ssl, tmp_buf + offset, buf_len - offset,
+    if (buf_len > 0 && RT()->tmp_buf == NULL
+        && !TEST_ptr(RT()->tmp_buf = OPENSSL_malloc(buf_len)))
+        goto err;
+
+    r = SSL_read_ex(ssl, RT()->tmp_buf + RT()->tmp_buf_offset,
+                    buf_len - RT()->tmp_buf_offset,
                     &bytes_read);
     if (!TEST_true(check_consistent_want(ssl, r)))
-        goto out;
-#endif
+        goto err;
 
     if (!r)
         F_SPIN_AGAIN();
+
+    if (bytes_read + RT()->tmp_buf_offset != buf_len) {
+        RT()->tmp_buf_offset += bytes_read;
+        F_SPIN_AGAIN();
+    }
+
+    if (buf_len > 0
+        && !TEST_mem_eq(RT()->tmp_buf, buf_len, buf, buf_len))
+        goto err;
+
+    OPENSSL_free(RT()->tmp_buf);
+    RT()->tmp_buf         = NULL;
+    RT()->tmp_buf_offset  = 0;
 
     ok = 1;
 err:
@@ -387,7 +398,7 @@ err:
 
 DEF_FUNC(hf_detach)
 {
-    int ok = 0, ret;
+    int ok = 0;
     const char *conn_name, *stream_name;
     SSL *conn, *stream;
 
@@ -410,7 +421,7 @@ err:
 
 DEF_FUNC(hf_attach)
 {
-    int ok = 0, ret;
+    int ok = 0;
     const char *conn_name, *stream_name;
     SSL *conn, *stream;
 
@@ -665,7 +676,3 @@ err:
     OP_PUSH_U64(slot) OP_PUSH_P(name) OP_FUNC(hf_select_ssl)
 #define OP_CLEAR_SLOT(slot) \
     OP_PUSH_U64(slot) OP_FUNC(hf_clear_slot)
-
-// TODO: NEW_THREAD
-// TODO: BEGIN_REPEAT
-// TODO: END_REPEAT
