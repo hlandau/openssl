@@ -462,18 +462,12 @@ err:
 static void SCRIPT_INFO_print(SCRIPT_INFO *script_info, BIO *bio, int error,
                               const char *msg)
 {
-    if (bio == bio_err) {
-        if (error)
-            TEST_error("%s: script '%s' (%s)",
-                       msg, script_info->name, script_info->desc);
-        else
-            TEST_info("%s: script '%s' (%s)",
-                      msg, script_info->name, script_info->desc);
-    } else {
-        BIO_printf(bio, "%s: %s: script '%s' (%s)",
-                   error ? "ERROR" : "INFO",
+    if (error)
+        TEST_error("%s: script '%s' (%s)",
                    msg, script_info->name, script_info->desc);
-    }
+    else
+        TEST_info("%s: script '%s' (%s)",
+                  msg, script_info->name, script_info->desc);
 }
 
 struct terp_st {
@@ -559,23 +553,9 @@ static ossl_inline int TERP_stk_pop(TERP *terp,
     return 1;
 }
 
-static void hexdump(BIO *bio, const void *buf, size_t buf_len)
-{
-    const unsigned char *p = buf, *end = p + buf_len;
-
-    for (; p < end; ++p) {
-        BIO_printf(bio, "%02x", *p);
-    }
-
-    if (buf_len > 0)
-        BIO_printf(bio, "\n");
-}
-
 static void TERP_print_stack(TERP *terp, BIO *bio, const char *header)
 {
-    /* Avoid test_output_memory, need to buffer on local thread. */
-    BIO_printf(bio, "\n%s:\n", header);
-    hexdump(bio, terp->stk_cur, terp->stk_end - terp->stk_cur);
+    test_output_memory(header, terp->stk_cur, terp->stk_end - terp->stk_cur);
     BIO_printf(bio, "  (%zu bytes)\n", terp->stk_end - terp->stk_cur);
     BIO_printf(bio, "\n");
 }

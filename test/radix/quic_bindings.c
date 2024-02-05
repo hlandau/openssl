@@ -392,6 +392,8 @@ static int radix_thread_init(RADIX_THREAD *rt)
     if (!TEST_true(CRYPTO_THREAD_set_local(&radix_thread, rt)))
         return 0;
 
+    set_override_bio_out(rt->debug_bio);
+    set_override_bio_err(rt->debug_bio);
     return 1;
 }
 
