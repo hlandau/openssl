@@ -14,8 +14,7 @@
 
 DEF_SCRIPT(simple_conn, "simple connection to server")
 {
-    OP_NEW_SSL_L_LISTEN(L);
-    OP_NEW_SSL_C(C);
+    OP_SIMPLE_PAIR_CONN();
 }
 
 /*

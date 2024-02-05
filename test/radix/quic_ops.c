@@ -11,11 +11,47 @@ err:
     return ok;
 }
 
+
+static int ssl_ctx_select_alpn(SSL *ssl,
+                               const unsigned char **out, unsigned char *out_len,
+                               const unsigned char *in, unsigned int in_len,
+                               void *arg)
+{
+    static const unsigned char alpn[] = {
+        8, 'o', 's', 's', 'l', 't', 'e', 's', 't'
+    };
+
+    if (SSL_select_next_proto((unsigned char **)out, out_len,
+                              alpn, sizeof(alpn), in, in_len)
+            != OPENSSL_NPN_NEGOTIATED)
+        return SSL_TLSEXT_ERR_ALERT_FATAL;
+
+    return SSL_TLSEXT_ERR_OK;
+}
+
+static int ssl_ctx_configure(SSL_CTX *ctx, int is_server)
+{
+    if (!TEST_true(ossl_quic_set_diag_title(ctx, "quic_radix_test")))
+        return 0;
+
+    if (!is_server)
+        return 1;
+
+    if (!TEST_int_eq(SSL_CTX_use_certificate_file(ctx, cert_file,
+                                                  SSL_FILETYPE_PEM), 1)
+        || !TEST_int_eq(SSL_CTX_use_PrivateKey_file(ctx, key_file,
+                                                    SSL_FILETYPE_PEM), 1))
+        return 0;
+
+    SSL_CTX_set_alpn_select_cb(ctx, ssl_ctx_select_alpn, NULL);
+    return 1;
+}
+
 DEF_FUNC(hf_new_ssl)
 {
     int ok = 0;
     const char *name;
-    SSL_CTX *ctx;
+    SSL_CTX *ctx = NULL;
     const SSL_METHOD *method;
     SSL *ssl;
     uint64_t flags;
@@ -28,6 +64,9 @@ DEF_FUNC(hf_new_ssl)
     if (!TEST_ptr(ctx = SSL_CTX_new(method)))
         goto err;
 
+    if (!TEST_true(ssl_ctx_configure(ctx, is_server)))
+        goto err;
+
     if (is_server) {
         if (!TEST_ptr(ssl = SSL_new_listener(ctx, 0)))
             goto err;
@@ -36,8 +75,6 @@ DEF_FUNC(hf_new_ssl)
             goto err;
     }
 
-    SSL_CTX_free(ctx);
-
     if (!TEST_true(RADIX_PROCESS_set_ssl(RP(), name, ssl))) {
         SSL_free(ssl);
         goto err;
@@ -45,6 +82,8 @@ DEF_FUNC(hf_new_ssl)
 
     ok = 1;
 err:
+    /* SSL object will hold ref, we don't need it */
+    SSL_CTX_free(ctx);
     return ok;
 }
 
@@ -659,6 +698,8 @@ err:
     OP_PUSH_U64(slot); OP_PUSH_P(#name); OP_FUNC(hf_select_ssl)
 #define OP_CLEAR_SLOT(slot) \
     OP_PUSH_U64(slot) OP_FUNC(hf_clear_slot)
+#define OP_CONNECT_WAIT(name) \
+    OP_SELECT_SSL(0, name); OP_FUNC(hf_connect_wait)
 #define OP_UNBIND(name) \
     OP_PUSH_P(name) OP_FUNC(hf_unbind)
 #define OP_LISTEN(name) \
@@ -669,6 +710,10 @@ err:
     OP_PUSH_P(#name); OP_PUSH_U64(1); OP_FUNC(hf_new_ssl)
 #define OP_NEW_SSL_L_LISTEN(name) \
     OP_NEW_SSL_L(name); OP_LISTEN(name)
+#define OP_SIMPLE_PAIR_CONN()   \
+    OP_NEW_SSL_L_LISTEN(L);     \
+    OP_NEW_SSL_C(C);            \
+    OP_CONNECT_WAIT(C)
 #define OP_NEW_STREAM(conn_name, stream_name, flags) \
     OP_PUSH_P(conn_name) OP_PUSH_P(stream_name) \
     OP_PUSH_U64(flags) OP_PUSH_U64(0) OP_FUNC(hf_new_stream)
@@ -707,8 +752,6 @@ err:
     OP_PUSH_U64(0) OP_FUNC(hf_read_fail)
 #define OP_READ_FAIL_WAIT() \
     OP_PUSH_U64(1) OP_FUNC(hf_read_fail)
-#define OP_CONNECT_WAIT() \
-    OP_FUNC(hf_connect_wait)
 #define OP_DETACH(conn_name, stream_name) \
     OP_PUSH_P(conn_name) OP_PUSH_P(stream_name) OP_FUNC(hf_detach)
 #define OP_ATTACH(conn_name, stream_name) \
