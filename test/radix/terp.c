@@ -12,7 +12,8 @@
 #include <openssl/lhash.h>
 #include <openssl/rand.h>
 #include "../testutil.h"
-#include "internal/numbers.h"  /* UINT64_C */
+#include "internal/numbers.h"   /* UINT64_C */
+#include "internal/time.h"      /* OSSL_TIME */
 
 static const char *cert_file, *key_file;
 
@@ -470,22 +471,30 @@ static void SCRIPT_INFO_print(SCRIPT_INFO *script_info, BIO *bio, int error,
                   msg, script_info->name, script_info->desc);
 }
 
+typedef struct terp_config_st {
+    BIO         *debug_bio;
+
+    OSSL_TIME   (*now_cb)(void *arg);
+    void        *now_cb_arg;
+} TERP_CONFIG;
+
 struct terp_st {
+    TERP_CONFIG         cfg;
     const SCRIPT_INFO   *script_info;
     const GEN_SCRIPT    *gen_script;
     SRDR                srdr;
     uint8_t             *stk_beg, *stk_cur, *stk_end;
-    BIO                 *debug_bio;
     FUNC_CTX            fctx;
     uint64_t            ops_executed;
     int                 log_execute;
 };
 
 static int TERP_init(TERP *terp,
+                     const TERP_CONFIG *cfg,
                      const SCRIPT_INFO *script_info,
-                     const GEN_SCRIPT *gen_script,
-                     BIO *debug_bio)
+                     const GEN_SCRIPT *gen_script)
 {
+    terp->cfg               = *cfg;
     terp->script_info       = script_info;
     terp->gen_script        = gen_script;
     terp->fctx.terp         = terp;
@@ -496,7 +505,6 @@ static int TERP_init(TERP *terp,
     terp->stk_end           = NULL;
     terp->ops_executed      = 0;
     terp->log_execute       = 1;
-    terp->debug_bio         = debug_bio;
     return 1;
 }
 
@@ -571,7 +579,7 @@ static int TERP_execute(TERP *terp)
     size_t op_num = SIZE_MAX;
     int in_debug_output = 0;
     size_t spin_count = 0;
-    BIO *debug_bio = terp->debug_bio;
+    BIO *debug_bio = terp->cfg.debug_bio;
 
     SRDR_init(&terp->srdr, terp->gen_script->buf, terp->gen_script->buf_len);
 
@@ -683,11 +691,12 @@ err:
     return ok;
 }
 
-static int TERP_run(SCRIPT_INFO *script_info, BIO *debug_bio)
+static int TERP_run(SCRIPT_INFO *script_info, TERP_CONFIG *cfg)
 {
     int ok = 0, have_terp = 0;
     TERP terp;
     GEN_SCRIPT gen_script = {0};
+    BIO *debug_bio = cfg->debug_bio;
 
     SCRIPT_INFO_print(script_info, debug_bio, /*error=*/0, "generating script");
 
@@ -706,8 +715,7 @@ static int TERP_run(SCRIPT_INFO *script_info, BIO *debug_bio)
     }
 
     /* Execute the script. */
-    if (!TEST_true(TERP_init(&terp, script_info, &gen_script,
-                             debug_bio)))
+    if (!TEST_true(TERP_init(&terp, cfg, script_info, &gen_script)))
         goto err;
 
     have_terp = 1;

@@ -16,17 +16,24 @@ OPT_TEST_DECLARE_USAGE("cert_file key_file\n")
  *
  *   int bindings_process_init(size_t node_idx, size_t process_idx);
  *   void bindings_process_finish();
+ *   int bindings_adjust_terp_config(TERP_CONFIG *cfg);
  *
  */
 static int test_script(int idx)
 {
     SCRIPT_INFO *script_info = scripts[idx];
     int testresult;
+    TERP_CONFIG cfg = {0};
 
     if (!TEST_true(bindings_process_init(0, 0)))
         return 0;
 
-    testresult = TERP_run(script_info, bio_err);
+    cfg.debug_bio = bio_err;
+
+    if (!TEST_true(bindings_adjust_terp_config(&cfg)))
+        return 0;
+
+    testresult = TERP_run(script_info, &cfg);
 
     if (!TEST_true(bindings_process_finish()))
         testresult = 0;

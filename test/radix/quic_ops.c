@@ -610,6 +610,19 @@ err:
     return ok;
 }
 
+DEF_FUNC(hf_skip_time)
+{
+    int ok = 0;
+    uint64_t ms;
+
+    F_POP(ms);
+
+    radix_skip_time(ossl_ms2time(ms));
+    ok = 1;
+err:
+    return ok;
+}
+
 #define OP_UNBIND(name) \
     OP_PUSH_P(name) OP_FUNC(hf_unbind)
 #define OP_NEW_SSL(name) \
@@ -676,3 +689,5 @@ err:
     OP_PUSH_U64(slot) OP_PUSH_P(name) OP_FUNC(hf_select_ssl)
 #define OP_CLEAR_SLOT(slot) \
     OP_PUSH_U64(slot) OP_FUNC(hf_clear_slot)
+#define OP_SKIP_TIME(ms) \
+    OP_PUSH_U64(ms) OP_FUNC(hf_skip_time)

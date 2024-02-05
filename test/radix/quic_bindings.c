@@ -76,11 +76,15 @@ DEFINE_LHASH_OF_EX(RADIX_OBJ);
 
 /* Process-level state (i.e. "globals" in the normal sense of the word) */
 typedef struct radix_process_st {
-    LHASH_OF(RADIX_OBJ)     *objs;
     size_t                  node_idx;
     size_t                  process_idx;
     size_t                  next_thread_idx;
     STACK_OF(RADIX_THREAD)  *threads;
+
+    /* Process-global state. */
+    CRYPTO_MUTEX            *gm;        /* global mutex */
+    LHASH_OF(RADIX_OBJ)     *objs;      /* protected by gm */
+    OSSL_TIME               time_slip;  /* protected by gm */
 
     int                     done_join_all_threads;
 
@@ -96,11 +100,11 @@ typedef struct radix_process_st {
 typedef struct radix_thread_st {
     RADIX_PROCESS       *rp;
     CRYPTO_THREAD       *t;
-    RADIX_OBJ           *slot[NUM_SLOTS];
-    SSL                 *ssl[NUM_SLOTS];
     unsigned char       *tmp_buf;
     size_t              tmp_buf_offset;
     size_t              thread_idx; /* 0=main thread */
+    RADIX_OBJ           *slot[NUM_SLOTS];
+    SSL                 *ssl[NUM_SLOTS];
 
     /* child thread spawn arguments */
     SCRIPT_INFO         *child_script_info;
@@ -154,20 +158,26 @@ static int RADIX_OBJ_cmp(const RADIX_OBJ *a, const RADIX_OBJ *b)
 
 static int RADIX_PROCESS_init(RADIX_PROCESS *rp, size_t node_idx, size_t process_idx)
 {
-    if (!TEST_ptr(rp->objs = lh_RADIX_OBJ_new(RADIX_OBJ_hash, RADIX_OBJ_cmp)))
-        return 0;
+    if (!TEST_ptr(rp->gm = ossl_crypto_mutex_new()))
+        goto err;
 
-    if (!TEST_ptr(rp->threads = sk_RADIX_THREAD_new(NULL))) {
-        lh_RADIX_OBJ_free(rp->objs);
-        rp->objs = NULL;
-        return 0;
-    }
+    if (!TEST_ptr(rp->objs = lh_RADIX_OBJ_new(RADIX_OBJ_hash, RADIX_OBJ_cmp)))
+        goto err;
+
+    if (!TEST_ptr(rp->threads = sk_RADIX_THREAD_new(NULL)))
+        goto err;
 
     rp->node_idx                = node_idx;
     rp->process_idx             = process_idx;
     rp->done_join_all_threads   = 0;
     rp->next_thread_idx         = 0;
     return 1;
+
+err:
+    lh_RADIX_OBJ_free(rp->objs);
+    rp->objs = NULL;
+    ossl_crypto_mutex_free(&rp->gm);
+    return 0;
 }
 
 static void RADIX_PROCESS_report_thread_results(RADIX_PROCESS *rp, BIO *bio)
@@ -254,6 +264,8 @@ static void RADIX_PROCESS_cleanup(RADIX_PROCESS *rp)
     lh_RADIX_OBJ_doall(rp->objs, cleanup_one);
     lh_RADIX_OBJ_free(rp->objs);
     rp->objs = NULL;
+
+    ossl_crypto_mutex_free(&rp->gm);
 }
 
 static RADIX_OBJ *RADIX_PROCESS_get_obj(RADIX_PROCESS *rp, const char *name)
@@ -444,6 +456,30 @@ static int bindings_process_finish(void)
 #define RP()    (&radix_process)
 #define RT()    (radix_get_thread())
 
+static OSSL_TIME get_time(void *arg)
+{
+    OSSL_TIME time_slip;
+
+    ossl_crypto_mutex_lock(RP()->gm);
+    time_slip = RP()->time_slip;
+    ossl_crypto_mutex_unlock(RP()->gm);
+
+    return ossl_time_add(ossl_time_now(), time_slip);
+}
+
+ossl_unused static void radix_skip_time(OSSL_TIME t)
+{
+    ossl_crypto_mutex_lock(RP()->gm);
+    RP()->time_slip = ossl_time_add(RP()->time_slip, t);
+    ossl_crypto_mutex_unlock(RP()->gm);
+}
+
+static int bindings_adjust_terp_config(TERP_CONFIG *cfg)
+{
+    cfg->now_cb = get_time;
+    return 1;
+}
+
 static int expect_slot_ssl(FUNC_CTX *fctx, size_t idx, SSL **p_ssl)
 {
     if (!TEST_size_t_lt(idx, NUM_SLOTS)
@@ -472,8 +508,13 @@ static int expect_slot_ssl(FUNC_CTX *fctx, size_t idx, SSL **p_ssl)
 static int RADIX_THREAD_worker_run(RADIX_THREAD *rt)
 {
     int ok = 0;
+    TERP_CONFIG cfg = {0};
 
-    if (!TERP_run(rt->child_script_info, rt->debug_bio))
+    cfg.debug_bio = rt->debug_bio;
+    if (!TEST_true(bindings_adjust_terp_config(&cfg)))
+        goto err;
+
+    if (!TERP_run(rt->child_script_info, &cfg))
         goto err;
 
     ok = 1;
