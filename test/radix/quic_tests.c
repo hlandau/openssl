@@ -29,12 +29,22 @@ err:
     return ok;
 }
 
+DEF_FUNC(hf_sleep) {
+    int ok = 0;
+    sleep(1);
+    F_SPIN_AGAIN();
+    ok = 1;
+err:
+    return ok;
+}
+
 DEF_SCRIPT(simple_conn, "simple connection to server")
 {
     OP_PUSH_BUF("apple");
     OP_LABEL("1");
     OP_PUSH_BUF("orange");
     OP_FUNC(some_helper);
+    OP_FUNC(hf_sleep);
 }
 
 DEF_SCRIPT(simple_thread_child, "threaded test (child)")

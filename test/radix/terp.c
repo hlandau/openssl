@@ -307,13 +307,14 @@ err:
 }
 
 typedef struct srdr_st {
-    const uint8_t   *beg, *cur, *end;
+    const uint8_t   *beg, *cur, *end, *save_cur;
 } SRDR;
 
 static void SRDR_init(SRDR *rdr, const uint8_t *buf, size_t buf_len)
 {
     rdr->beg = rdr->cur = buf;
     rdr->end = rdr->beg + buf_len;
+    rdr->save_cur = NULL;
 }
 
 static ossl_inline int SRDR_get_operand(SRDR *srdr, void *buf, size_t buf_len)
@@ -324,6 +325,16 @@ static ossl_inline int SRDR_get_operand(SRDR *srdr, void *buf, size_t buf_len)
     memcpy(buf, srdr->cur, buf_len);
     srdr->cur += buf_len;
     return 1;
+}
+
+static ossl_inline void SRDR_save(SRDR *srdr)
+{
+    srdr->save_cur = srdr->cur;
+}
+
+static ossl_inline void SRDR_restore(SRDR *srdr)
+{
+    srdr->cur = srdr->save_cur;
 }
 
 #define GET_OPERAND(srdr, v)                                        \
@@ -476,7 +487,11 @@ typedef struct terp_config_st {
 
     OSSL_TIME   (*now_cb)(void *arg);
     void        *now_cb_arg;
+
+    OSSL_TIME   max_execution_time; /* duration */
 } TERP_CONFIG;
+
+#define TERP_DEFAULT_MAX_EXECUTION_TIME     (ossl_ms2time(3000))
 
 struct terp_st {
     TERP_CONFIG         cfg;
@@ -487,6 +502,7 @@ struct terp_st {
     FUNC_CTX            fctx;
     uint64_t            ops_executed;
     int                 log_execute;
+    OSSL_TIME           start_time, deadline_time;
 };
 
 static int TERP_init(TERP *terp,
@@ -494,6 +510,9 @@ static int TERP_init(TERP *terp,
                      const SCRIPT_INFO *script_info,
                      const GEN_SCRIPT *gen_script)
 {
+    if (!TEST_true(cfg->now_cb != NULL))
+        return 0;
+
     terp->cfg               = *cfg;
     terp->script_info       = script_info;
     terp->gen_script        = gen_script;
@@ -505,6 +524,10 @@ static int TERP_init(TERP *terp,
     terp->stk_end           = NULL;
     terp->ops_executed      = 0;
     terp->log_execute       = 1;
+
+    if (ossl_time_is_zero(terp->cfg.max_execution_time))
+        terp->cfg.max_execution_time = TERP_DEFAULT_MAX_EXECUTION_TIME;
+
     return 1;
 }
 
@@ -570,7 +593,19 @@ static void TERP_print_stack(TERP *terp, BIO *bio, const char *header)
 
 #define TERP_GET_OPERAND(v) GET_OPERAND(&terp->srdr, (v))
 
-#define TERP_SPIN_AGAIN() do { ++spin_count; goto spin_again; } while (0)
+#define TERP_SPIN_AGAIN() do { SRDR_restore(&terp->srdr); ++spin_count; goto spin_again; } while (0)
+
+static OSSL_TIME TERP_now(TERP *terp)
+{
+    return terp->cfg.now_cb(terp->cfg.now_cb_arg);
+}
+
+static void TERP_log_spin(TERP *terp, size_t spin_count)
+{
+    if (spin_count > 0)
+        BIO_printf(terp->cfg.debug_bio, "           \t\t(span %zu times)\n",
+                   spin_count);
+}
 
 static int TERP_execute(TERP *terp)
 {
@@ -583,6 +618,10 @@ static int TERP_execute(TERP *terp)
 
     SRDR_init(&terp->srdr, terp->gen_script->buf, terp->gen_script->buf_len);
 
+    terp->start_time    = TERP_now(terp);
+    terp->deadline_time = ossl_time_add(terp->start_time,
+                                        terp->cfg.max_execution_time);
+
     for (;;) {
         if (terp->log_execute) {
             SRDR srdr_copy = terp->srdr;
@@ -593,11 +632,7 @@ static int TERP_execute(TERP *terp)
                 in_debug_output = 1;
             }
 
-            if (spin_count > 0)
-                BIO_printf(debug_bio, "           \t\t(span %zu times)\n",
-                           spin_count);
-
-
+            TERP_log_spin(terp, spin_count);
             if (!TEST_true(SRDR_print_one(&srdr_copy, debug_bio, SIZE_MAX, NULL)))
                 goto err;
 
@@ -606,10 +641,18 @@ static int TERP_execute(TERP *terp)
 
         TERP_GET_OPERAND(opc);
         ++op_num;
+        SRDR_save(&terp->srdr);
         spin_count = 0;
 
-spin_again:
         ++terp->ops_executed;
+
+spin_again:
+        if (ossl_time_compare(TERP_now(terp), terp->deadline_time) >= 0) {
+            TEST_error("timed out while executing op %zu", op_num);
+            if (terp->log_execute)
+                TERP_log_spin(terp, spin_count);
+            goto err;
+        }
 
         switch (opc) {
         case OPK_END:
