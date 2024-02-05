@@ -488,6 +488,9 @@ typedef struct terp_config_st {
     OSSL_TIME   (*now_cb)(void *arg);
     void        *now_cb_arg;
 
+    void        (*per_op_cb)(TERP *terp, void *arg);
+    void        *per_op_cb_arg;
+
     OSSL_TIME   max_execution_time; /* duration */
 } TERP_CONFIG;
 
@@ -653,6 +656,9 @@ spin_again:
                 TERP_log_spin(terp, spin_count);
             goto err;
         }
+
+        if (terp->cfg.per_op_cb != NULL)
+            terp->cfg.per_op_cb(terp, terp->cfg.per_op_cb_arg);
 
         switch (opc) {
         case OPK_END:
