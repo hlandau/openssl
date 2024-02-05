@@ -57,9 +57,13 @@ typedef struct radix_process_st {
     LHASH_OF(RADIX_OBJ) *objs;
 } RADIX_PROCESS;
 
+#define NUM_SLOTS       4
+
 /* Thread-level state within a process */
 typedef struct radix_thread_st {
     RADIX_PROCESS       *rp;
+    RADIX_OBJ           *slot[NUM_SLOTS];
+    SSL                 *ssl[NUM_SLOTS];
 } RADIX_THREAD;
 
 /* ssl reference is transferred. name is copied and is required. */
@@ -182,7 +186,14 @@ static SSL *RADIX_PROCESS_get_ssl(RADIX_PROCESS *rp, const char *name)
 
 static int RADIX_THREAD_init(RADIX_THREAD *rt, RADIX_PROCESS *rp)
 {
+    size_t i;
+
     rt->rp = rp;
+    for (i = 0; i < OSSL_NELEM(rt->slot); ++i) {
+        rt->slot[i] = NULL;
+        rt->ssl[i]  = NULL;
+    }
+
     return 1;
 }
 
@@ -192,7 +203,35 @@ static void RADIX_THREAD_cleanup(RADIX_THREAD *rt)
 }
 
 static RADIX_PROCESS radix_process;
+static RADIX_THREAD *radix_thread;
+
 #define RP()    (&radix_process)
+#define RT()    (radix_thread) /* TODO */
+
+static int expect_slot_ssl(FUNC_CTX *fctx, size_t idx, SSL **p_ssl)
+{
+    if (!TEST_size_t_lt(idx, NUM_SLOTS)
+        || !TEST_ptr(*p_ssl = RT()->ssl[idx]))
+        return 0;
+
+    return 1;
+}
+
+#define REQUIRE_SSL_N(idx, ssl)                                 \
+    do {                                                        \
+        if (!TEST_true(expect_slot_ssl(fctx, (idx), &(ssl))))   \
+            goto err;                                           \
+    } while (0)
+#define REQUIRE_SSL(ssl)    REQUIRE_SSL_N(0, (ssl))
+
+#define C_BIDI_ID(ordinal) \
+    (((ordinal) << 2) | QUIC_STREAM_INITIATOR_CLIENT | QUIC_STREAM_DIR_BIDI)
+#define S_BIDI_ID(ordinal) \
+    (((ordinal) << 2) | QUIC_STREAM_INITIATOR_SERVER | QUIC_STREAM_DIR_BIDI)
+#define C_UNI_ID(ordinal) \
+    (((ordinal) << 2) | QUIC_STREAM_INITIATOR_CLIENT | QUIC_STREAM_DIR_UNI)
+#define S_UNI_ID(ordinal) \
+    (((ordinal) << 2) | QUIC_STREAM_INITIATOR_SERVER | QUIC_STREAM_DIR_UNI)
 
 DEF_FUNC(hf_unbind)
 {
@@ -311,8 +350,7 @@ DEF_FUNC(hf_stream_reset)
     SSL *ssl;
 
     F_POP2(name, args.quic_error_code);
-    if (!TEST_ptr(ssl = RADIX_PROCESS_get_ssl(RP(), name)))
-        goto err;
+    REQUIRE_SSL(ssl);
 
     if (!TEST_true(SSL_stream_reset(ssl, &args, sizeof(args))))
         goto err;
@@ -325,13 +363,11 @@ err:
 DEF_FUNC(hf_set_default_stream_mode)
 {
     int ok = 0;
-    const char *name;
     uint64_t mode;
     SSL *ssl;
 
-    F_POP2(name, mode);
-    if (!TEST_ptr(ssl = RADIX_PROCESS_get_ssl(RP(), name)))
-        goto err;
+    F_POP(mode);
+    REQUIRE_SSL(ssl);
 
     if (!TEST_true(SSL_set_default_stream_mode(ssl, mode)))
         goto err;
@@ -344,14 +380,12 @@ err:
 DEF_FUNC(hf_set_incoming_stream_policy)
 {
     int ok = 0;
-    const char *name;
     uint64_t policy, error_code;
     SSL *ssl;
 
     F_POP(error_code);
-    F_POP2(name, policy);
-    if (!TEST_ptr(ssl = RADIX_PROCESS_get_ssl(RP(), name)))
-        goto err;
+    F_POP(policy);
+    REQUIRE_SSL(ssl);
 
     if (!TEST_true(SSL_set_incoming_stream_policy(ssl, policy, error_code)))
         goto err;
@@ -364,7 +398,6 @@ err:
 DEF_FUNC(hf_shutdown_wait)
 {
     int ok = 0, ret;
-    const char *name;
     uint64_t flags;
     SSL *ssl;
     SSL_SHUTDOWN_EX_ARGS args = {0};
@@ -372,9 +405,8 @@ DEF_FUNC(hf_shutdown_wait)
 
     F_POP(args.quic_reason);
     F_POP(args.quic_error_code);
-    F_POP2(name, flags);
-    if (!TEST_ptr(ssl = RADIX_PROCESS_get_ssl(RP(), name)))
-        goto err;
+    F_POP(flags);
+    REQUIRE_SSL(ssl);
 
     ch = ossl_quic_conn_get_channel(ssl);
     ossl_quic_engine_set_inhibit_tick(ossl_quic_channel_get0_engine(ch), 0);
@@ -394,12 +426,9 @@ err:
 DEF_FUNC(hf_conclude)
 {
     int ok = 0;
-    const char *name;
     SSL *ssl;
 
-    F_POP(name);
-    if (!TEST_ptr(ssl = RADIX_PROCESS_get_ssl(RP(), name)))
-        goto err;
+    REQUIRE_SSL(ssl);
 
     if (!TEST_true(SSL_stream_conclude(ssl, 0)))
         goto err;
@@ -442,15 +471,12 @@ static int check_consistent_want(SSL *s, int ret)
 DEF_FUNC(hf_write)
 {
     int ok = 0, r;
-    const char *name;
     SSL *ssl;
     const void *buf;
     size_t buf_len, bytes_written = 0;
 
     F_POP2(buf, buf_len);
-    F_POP(name);
-    if (!TEST_ptr(ssl = RADIX_PROCESS_get_ssl(RP(), name)))
-        goto err;
+    REQUIRE_SSL(ssl);
 
     r = SSL_write_ex(ssl, buf, buf_len, &bytes_written);
     if (!TEST_true(r)
@@ -466,7 +492,6 @@ err:
 DEF_FUNC(hf_write_ex2)
 {
     int ok = 0, r;
-    const char *name;
     SSL *ssl;
     const void *buf;
     size_t buf_len, bytes_written = 0;
@@ -474,9 +499,7 @@ DEF_FUNC(hf_write_ex2)
 
     F_POP(flags);
     F_POP2(buf, buf_len);
-    F_POP(name);
-    if (!TEST_ptr(ssl = RADIX_PROCESS_get_ssl(RP(), name)))
-        goto err;
+    REQUIRE_SSL(ssl);
 
     r = SSL_write_ex2(ssl, buf, buf_len, flags, &bytes_written);
     if (!TEST_true(r)
@@ -492,13 +515,10 @@ err:
 DEF_FUNC(hf_write_fail)
 {
     int ok = 0, ret;
-    const char *name;
     SSL *ssl;
     size_t bytes_written = 0;
 
-    F_POP(name);
-    if (!TEST_ptr(ssl = RADIX_PROCESS_get_ssl(RP(), name)))
-        goto err;
+    REQUIRE_SSL(ssl);
 
     ret = SSL_write_ex(ssl, "apple", 5, &bytes_written);
     if (!TEST_false(ret)
@@ -514,15 +534,12 @@ err:
 DEF_FUNC(hf_read_expect)
 {
     int ok = 0, r;
-    const char *name;
     SSL *ssl;
     const void *buf;
     size_t buf_len, bytes_read = 0;
 
     F_POP2(buf, buf_len);
-    F_POP(name);
-    if (!TEST_ptr(ssl = RADIX_PROCESS_get_ssl(RP(), name)))
-        goto err;
+    REQUIRE_SSL(ssl);
 
 /* TODO: TMP BUF */
 #if 0
@@ -543,15 +560,13 @@ err:
 DEF_FUNC(hf_read_fail)
 {
     int ok = 0, r;
-    const char *name;
     SSL *ssl;
     char buf[1] = {0};
     size_t bytes_read = 0;
     uint64_t do_wait;
 
-    F_POP2(name, do_wait);
-    if (!TEST_ptr(ssl = RADIX_PROCESS_get_ssl(RP(), name)))
-        goto err;
+    F_POP(do_wait);
+    REQUIRE_SSL(ssl);
 
     r = SSL_read_ex(ssl, buf, sizeof(buf), &bytes_read);
     if (!TEST_false(r)
@@ -570,12 +585,9 @@ err:
 DEF_FUNC(hf_connect_wait)
 {
     int ok = 0, ret;
-    const char *name;
     SSL *ssl;
 
-    F_POP(name);
-    if (!TEST_ptr(ssl = RADIX_PROCESS_get_ssl(RP(), name)))
-        goto err;
+    REQUIRE_SSL(ssl);
 
     /* if not started */
     if (0) {
@@ -659,14 +671,11 @@ err:
 DEF_FUNC(hf_expect_fin)
 {
     int ok = 0, ret;
-    const char *name;
     SSL *ssl;
     char buf[1];
     size_t bytes_read = 0;
 
-    F_POP(name);
-    if (!TEST_ptr(ssl = RADIX_PROCESS_get_ssl(RP(), name)))
-        goto err;
+    REQUIRE_SSL(ssl);
 
     ret = SSL_read_ex(ssl, buf, sizeof(buf), &bytes_read);
     if (!TEST_true(check_consistent_want(ssl, ret))
@@ -692,16 +701,13 @@ err:
 DEF_FUNC(hf_expect_conn_close_info)
 {
     int ok = 0;
-    const char *name;
     SSL *ssl;
     SSL_CONN_CLOSE_INFO cc_info = {0};
     uint64_t error_code, expect_app, expect_remote;
 
     F_POP(error_code);
     F_POP2(expect_app, expect_remote);
-    F_POP(name);
-    if (!TEST_ptr(ssl = RADIX_PROCESS_get_ssl(RP(), name)))
-        goto err;
+    REQUIRE_SSL(ssl);
 
     /* TODO BLOCKING */
 
@@ -725,14 +731,11 @@ err:
 DEF_FUNC(hf_wait_for_data)
 {
     int ok = 0;
-    const char *name;
     SSL *ssl;
     char buf[1];
     size_t bytes_read = 0;
 
-    F_POP(name);
-    if (!TEST_ptr(ssl = RADIX_PROCESS_get_ssl(RP(), name)))
-        goto err;
+    REQUIRE_SSL(ssl);
 
     if (!SSL_peek_ex(ssl, buf, sizeof(buf), &bytes_read)
         || bytes_read == 0)
@@ -761,13 +764,11 @@ err:
 DEF_FUNC(hf_expect_ssl_err)
 {
     int ok = 0;
-    const char *name;
     uint64_t expected;
     SSL *ssl;
 
-    F_POP2(name, expected);
-    if (!TEST_ptr(ssl = RADIX_PROCESS_get_ssl(RP(), name)))
-        goto err;
+    F_POP(expected);
+    REQUIRE_SSL(ssl);
 
     if (!TEST_size_t_eq((size_t)SSL_get_error(ssl, 0), expected)
         || !TEST_int_eq(SSL_want(ssl), SSL_NOTHING))
@@ -781,18 +782,53 @@ err:
 DEF_FUNC(hf_expect_stream_id)
 {
     int ok = 0;
-    const char *name;
     SSL *ssl;
     uint64_t expected, actual;
 
-    F_POP2(name, expected);
-    if (!TEST_ptr(ssl = RADIX_PROCESS_get_ssl(RP(), name)))
-        goto err;
+    F_POP(expected);
+    REQUIRE_SSL(ssl);
 
     actual = SSL_get_stream_id(ssl);
     if (!TEST_uint64_t_eq(actual, expected))
         goto err;
 
+    ok = 1;
+err:
+    return ok;
+}
+
+DEF_FUNC(hf_select_ssl)
+{
+    int ok = 0;
+    uint64_t slot;
+    const char *name;
+    RADIX_OBJ *obj;
+
+    F_POP2(slot, name);
+    if (!TEST_ptr(obj = RADIX_PROCESS_get_obj(RP(), name)))
+        goto err;
+
+    if (!TEST_uint64_t_lt(slot, NUM_SLOTS))
+        goto err;
+
+    RT()->slot[slot]    = obj;
+    RT()->ssl[slot]     = obj->ssl;
+    ok = 1;
+err:
+    return ok;
+}
+
+DEF_FUNC(hf_clear_slot)
+{
+    int ok = 0;
+    uint64_t slot;
+
+    F_POP(slot);
+    if (!TEST_uint64_t_lt(slot, NUM_SLOTS))
+        goto err;
+
+    RT()->slot[slot]    = NULL;
+    RT()->ssl[slot]     = NULL;
     ok = 1;
 err:
     return ok;
@@ -810,51 +846,61 @@ err:
     OP_PUSH_U64(flags) OP_PUSH_U64(1) OP_FUNC(hf_new_stream)
 #define OP_ACCEPT_STREAM_NONE(conn_name, flags) \
     OP_FUNC(hf_accept_stream_none)
-#define OP_STREAM_RESET(name, error_code) \
-    OP_PUSH_P(name) OP_PUSH_U64(flags) OP_FUNC(hf_stream_reset)
-#define OP_SET_DEFAULT_STREAM_MODE(name, mode) \
-    OP_PUSH_P(name) OP_PUSH_U64(mode) OP_FUNC(hf_set_default_stream_mode)
-#define OP_SET_INCOMING_STREAM_POLICY(name, policy, error_code) \
-    OP_PUSH_P(name) OP_PUSH_U64(policy) OP_PUSH_U64(error_code) \
+
+#define OP_STREAM_RESET(error_code) \
+    OP_PUSH_U64(flags) OP_FUNC(hf_stream_reset)
+#define OP_SET_DEFAULT_STREAM_MODE(mode) \
+    OP_PUSH_U64(mode) OP_FUNC(hf_set_default_stream_mode)
+#define OP_SET_INCOMING_STREAM_POLICY(policy, error_code) \
+    OP_PUSH_U64(policy) OP_PUSH_U64(error_code) \
     OP_FUNC(hf_set_incoming_stream_policy)
 #define OP_POP_ERR() OP_FUNC(hf_pop_err)
-#define OP_SHUTDOWN_WAIT(name, flags, error_code, reason) \
-    OP_PUSH_P(name) OP_PUSH_U64(flags) OP_PUSH_U64(error_code) OP_PUSH_P(reason) \
+#define OP_SHUTDOWN_WAIT(flags, error_code, reason) \
+    OP_PUSH_U64(flags) OP_PUSH_U64(error_code) OP_PUSH_P(reason) \
     OP_FUNC(hf_shutdown_wait)
-#define OP_CONCLUDE(name) \
-    OP_PUSH_P(name) OP_FUNC(hf_conclude)
-#define OP_WRITE(name, buf, buf_len) \
-    OP_PUSH_P(name) OP_PUSH_P(buf) OP_PUSH_U64(buf_len) OP_FUNC(hf_write)
-#define OP_WRITE_EX2(name, buf, buf_len, flags) \
-    OP_PUSH_P(name) OP_PUSH_P(buf) OP_PUSH_U64(buf_len) \
+#define OP_CONCLUDE() \
+    OP_FUNC(hf_conclude)
+#define OP_WRITE(buf, buf_len) \
+    OP_PUSH_P(buf) OP_PUSH_U64(buf_len) OP_FUNC(hf_write)
+#define OP_WRITE_EX2(buf, buf_len, flags) \
+    OP_PUSH_P(buf) OP_PUSH_U64(buf_len) \
     OP_PUSH_U64(flags) OP_FUNC(hf_write_ex2)
-#define OP_WRITE_B(name, buf)   OP_WRITE((name), (buf), sizeof(buf))
-#define OP_WRITE_FAIL(name) \
-    OP_PUSH_P(name) OP_FUNC(hf_write_fail)
-#define OP_READ_EXPECT(name, buf, buf_len) \
-    OP_PUSH_P(name) OP_PUSH_P(buf) OP_PUSH_U64(buf_len) OP_FUNC(hf_read_expect)
-#define OP_READ_EXPECT_B(name, buf) \
-    OP_READ_EXPECT((name), (buf), sizeof(buf))
-#define OP_READ_FAIL(name) \
-    OP_PUSH_P(name) OP_PUSH_U64(0) OP_FUNC(hf_read_fail)
-#define OP_READ_FAIL_WAIT(name) \
-    OP_PUSH_P(name) OP_PUSH_U64(1) OP_FUNC(hf_read_fail)
-#define OP_CONNECT_WAIT(name) \
-    OP_PUSH_P(name) OP_FUNC(hf_connect_wait)
+#define OP_WRITE_B(buf)   OP_WRITE((buf), sizeof(buf))
+#define OP_WRITE_FAIL() \
+    OP_FUNC(hf_write_fail)
+#define OP_READ_EXPECT(buf, buf_len) \
+    OP_PUSH_P(buf) OP_PUSH_U64(buf_len) OP_FUNC(hf_read_expect)
+#define OP_READ_EXPECT_B(buf) \
+    OP_READ_EXPECT((buf), sizeof(buf))
+#define OP_READ_FAIL() \
+    OP_PUSH_U64(0) OP_FUNC(hf_read_fail)
+#define OP_READ_FAIL_WAIT() \
+    OP_PUSH_U64(1) OP_FUNC(hf_read_fail)
+#define OP_CONNECT_WAIT() \
+    OP_FUNC(hf_connect_wait)
 #define OP_DETACH(conn_name, stream_name) \
     OP_PUSH_P(conn_name) OP_PUSH_P(stream_name) OP_FUNC(hf_detach)
 #define OP_ATTACH(conn_name, stream_name) \
     OP_PUSH_P(conn_name) OP_PUSH_P(stream_name) OP_FUNC(hf_attach)
-#define OP_EXPECT_FIN(name) \
-    OP_PUSH_P(name) OP_FUNC(hf_expect_fin)
-#define OP_EXPECT_CONN_CLOSE_INFO(name, error_code, expect_app, expect_remote) \
-    OP_PUSH_P(name) OP_PUSH_U64(expect_app) OP_PUSH_U64(expect_remote) \
+#define OP_EXPECT_FIN() \
+    OP_FUNC(hf_expect_fin)
+#define OP_EXPECT_CONN_CLOSE_INFO(error_code, expect_app, expect_remote) \
+    OP_PUSH_U64(expect_app) OP_PUSH_U64(expect_remote) \
     OP_PUSH_U64(error_code) OP_FUNC(hf_expect_conn_close_info)
-#define OP_WAIT_FOR_DATA(name) \
-    OP_PUSH_P(name) OP_FUNC(hf_wait_for_data)
+#define OP_WAIT_FOR_DATA() \
+    OP_FUNC(hf_wait_for_data)
 #define OP_EXPECT_ERR(lib, reason) \
     OP_PUSH_U64(lib) OP_PUSH_U64(reason) OP_FUNC(hf_expect_err)
-#define OP_EXPECT_SSL_ERR(name, expected) \
-    OP_PUSH_P(name) OP_PUSH_U64(expected) OP_FUNC(hf_expect_ssl_err)
-#define OP_EXPECT_STREAM_ID(name, expected) \
-    OP_PUSH_P(name) OP_PUSH_U64(expected) OP_FUNC(hf_expect_stream_id)
+#define OP_EXPECT_SSL_ERR(expected) \
+    OP_PUSH_U64(expected) OP_FUNC(hf_expect_ssl_err)
+#define OP_EXPECT_STREAM_ID(expected) \
+    OP_PUSH_U64(expected) OP_FUNC(hf_expect_stream_id)
+
+#define OP_SELECT_SSL(slot, name) \
+    OP_PUSH_U64(slot) OP_PUSH_P(name) OP_FUNC(hf_select_ssl)
+#define OP_CLEAR_SLOT(slot) \
+    OP_PUSH_U64(slot) OP_FUNC(hf_clear_slot)
+
+// TODO: NEW_THREAD
+// TODO: BEGIN_REPEAT
+// TODO: END_REPEAT
