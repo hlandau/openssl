@@ -811,6 +811,7 @@ DEF_FUNC(hf_set_peer_addr_from)
     //fprintf(stderr, "#  to 0x%x, %d\n", ntohl(*(uint32_t*)&((struct sockaddr_in*)src_addr)->sin_addr), ntohs(BIO_ADDR_rawport(src_addr)));
     ok = 1;
 err:
+    BIO_ADDR_free(src_addr);
     return ok;
 }
 
