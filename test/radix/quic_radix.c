@@ -7,6 +7,7 @@
  * https://www.openssl.org/source/license.html
  */
 #include "terp.c"
-#include "bindings.c"
-#include "tests.c"
+#include "quic_bindings.c"
+#include "quic_ops.c"
+#include "quic_tests.c"
 #include "main.c"
