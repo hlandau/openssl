@@ -45,6 +45,8 @@ static const char *cert_file, *key_file;
  */
 typedef struct gen_ctx_st GEN_CTX;
 
+int g_log_execute = 1;
+
 typedef void (*script_gen_t)(GEN_CTX *ctx);
 
 typedef struct script_info_st {
@@ -90,8 +92,23 @@ static void GEN_CTX_cleanup(GEN_CTX *ctx)
 
 typedef struct terp_st TERP;
 
+#define F_RET_SPIN_AGAIN        2
+
+#define F_SPIN_AGAIN()                          \
+    do {                                        \
+        ok                  = F_RET_SPIN_AGAIN; \
+        fctx->spin_again    = 1;                \
+        goto err;                               \
+    } while (0)
+
 typedef struct func_ctx_st {
-    TERP *terp;
+    TERP    *terp;
+
+    /*
+     * Set to 1 inside a user function if the function should spin again.
+     * Cleared automatically after the user function returns.
+     */
+    int     spin_again;
 } FUNC_CTX;
 
 static ossl_inline int TERP_stk_pop(TERP *terp,
@@ -120,6 +137,8 @@ static ossl_inline int TERP_stk_pop(TERP *terp,
 #define F_POP2(a, b)    TERP_STK_POP2(fctx->terp, (a), (b))
 
 typedef int (*helper_func_t)(FUNC_CTX *fctx);
+
+#define DEF_FUNC(name) static int name(FUNC_CTX *fctx)
 
 #define DEF_SCRIPT(name, desc)                          \
     static void script_gen_##name(GEN_CTX *ctx);        \
@@ -523,17 +542,20 @@ static void TERP_print_stack(TERP *terp, const char *header)
 
 #define TERP_GET_OPERAND(v) GET_OPERAND(&terp->srdr, (v))
 
+#define TERP_SPIN_AGAIN() do { ++spin_count; goto spin_again; } while (0)
+
 static int TERP_execute(TERP *terp)
 {
     int ok = 0;
     uint64_t opc;
     size_t op_num = SIZE_MAX;
     int in_debug_output = 0;
+    size_t spin_count = 0;
 
     SRDR_init(&terp->srdr, terp->gen_script->buf, terp->gen_script->buf_len);
 
     for (;;) {
-        {
+        if (g_log_execute) {
             SRDR srdr_copy = terp->srdr;
 
             if (!in_debug_output) {
@@ -541,6 +563,11 @@ static int TERP_execute(TERP *terp)
                           "------------------------------\n");
                 in_debug_output = 1;
             }
+
+            if (spin_count > 0)
+                BIO_printf(bio_err, "           \t\t(span %zu times)\n",
+                           spin_count);
+
 
             if (!TEST_true(SRDR_print_one(&srdr_copy, SIZE_MAX, NULL)))
                 goto err;
@@ -550,6 +577,9 @@ static int TERP_execute(TERP *terp)
 
         TERP_GET_OPERAND(opc);
         ++op_num;
+        spin_count = 0;
+
+spin_again:
         ++terp->ops_executed;
 
         switch (opc) {
@@ -575,6 +605,7 @@ static int TERP_execute(TERP *terp)
             {
                 helper_func_t v;
                 const void *f_name;
+                int ret;
 
                 TERP_GET_OPERAND(v);
                 TERP_GET_OPERAND(f_name);
@@ -582,8 +613,19 @@ static int TERP_execute(TERP *terp)
                 if (!TEST_true(v != NULL))
                     goto err;
 
-                if (!TEST_true(v(&terp->fctx)))
-                    goto err;
+                ret = v(&terp->fctx);
+
+                if (terp->fctx.spin_again) {
+                    if (!TEST_int_eq(ret, F_RET_SPIN_AGAIN))
+                        goto err;
+
+                    terp->fctx.spin_again = 0;
+                    TERP_SPIN_AGAIN();
+                } else {
+                    if (!TEST_int_eq(ret, 1)
+                        || !TEST_false(terp->fctx.spin_again))
+                        goto err;
+                }
             }
             break;
         default:
