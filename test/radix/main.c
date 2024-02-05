@@ -26,7 +26,7 @@ static int test_script(int idx)
     if (!TEST_true(bindings_process_init(0, 0)))
         return 0;
 
-    testresult = TERP_run(script_info);
+    testresult = TERP_run(script_info, bio_err);
 
     if (!TEST_true(bindings_process_finish()))
         testresult = 0;

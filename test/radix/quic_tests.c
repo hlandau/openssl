@@ -44,6 +44,7 @@ DEF_SCRIPT(simple_thread_child, "threaded test (child)")
 DEF_SCRIPT(simple_thread, "threaded test")
 {
     OP_SPAWN_THREAD(simple_thread_child);
+    OP_SPAWN_THREAD(simple_thread_child);
 }
 
 /*

@@ -22,8 +22,6 @@ static const char *cert_file, *key_file;
  */
 typedef struct gen_ctx_st GEN_CTX;
 
-int g_log_execute = 1;
-
 typedef void (*script_gen_t)(GEN_CTX *ctx);
 
 typedef struct script_info_st {
@@ -334,17 +332,17 @@ static ossl_inline int SRDR_get_operand(SRDR *srdr, void *buf, size_t buf_len)
     } while (0)
 
 
-static void print_opc(size_t op_num, size_t offset, const char *name)
+static void print_opc(BIO *bio, size_t op_num, size_t offset, const char *name)
 {
     if (op_num != SIZE_MAX)
-        BIO_printf(bio_err, "%3zu-  %4zx>\t%-8s \t", op_num,
+        BIO_printf(bio, "%3zu-  %4zx>\t%-8s \t", op_num,
                    offset, name);
     else
-        BIO_printf(bio_err, "      %4zx>\t%-8s \t",
+        BIO_printf(bio, "      %4zx>\t%-8s \t",
                    offset, name);
 }
 
-static int SRDR_print_one(SRDR *srdr, size_t i, int *was_end)
+static int SRDR_print_one(SRDR *srdr, BIO *bio, size_t i, int *was_end)
 {
     int ok = 0;
     const uint8_t *opc_start;
@@ -356,7 +354,7 @@ static int SRDR_print_one(SRDR *srdr, size_t i, int *was_end)
     opc_start = srdr->cur;
     GET_OPERAND(srdr, opc);
 
-#define PRINT_OPC(name) print_opc(i, (size_t)(opc_start - srdr->beg), #name)
+#define PRINT_OPC(name) print_opc(bio, i, (size_t)(opc_start - srdr->beg), #name)
 
     switch (opc) {
     case OPK_END:
@@ -371,7 +369,7 @@ static int SRDR_print_one(SRDR *srdr, size_t i, int *was_end)
 
             GET_OPERAND(srdr, v);
             PRINT_OPC(PUSH_P);
-            BIO_printf(bio_err, "%20p", v);
+            BIO_printf(bio, "%20p", v);
         }
         break;
     case OPK_PUSH_U64:
@@ -380,7 +378,7 @@ static int SRDR_print_one(SRDR *srdr, size_t i, int *was_end)
 
             GET_OPERAND(srdr, v);
             PRINT_OPC(PUSH_U64);
-            BIO_printf(bio_err, "%#20llx (%lld)",
+            BIO_printf(bio, "%#20llx (%lld)",
                        (unsigned long long)v, (unsigned long long)v);
         }
         break;
@@ -394,7 +392,7 @@ static int SRDR_print_one(SRDR *srdr, size_t i, int *was_end)
 
             PRINT_OPC(FUNC);
             memcpy(&x, &v, sizeof(x) < sizeof(v) ? sizeof(x) : sizeof(v));
-            BIO_printf(bio_err, "%s", (const char *)f_name);
+            BIO_printf(bio, "%s", (const char *)f_name);
         }
         break;
     case OPK_LABEL:
@@ -403,7 +401,7 @@ static int SRDR_print_one(SRDR *srdr, size_t i, int *was_end)
 
             GET_OPERAND(srdr, l_name);
 
-            BIO_printf(bio_err, "\n%s:\n", (const char *)l_name);
+            BIO_printf(bio, "\n%s:\n", (const char *)l_name);
             PRINT_OPC(LABEL);
         }
         break;
@@ -418,7 +416,7 @@ err:
     return ok;
 }
 
-static int GEN_SCRIPT_print(GEN_SCRIPT *gen_script,
+static int GEN_SCRIPT_print(GEN_SCRIPT *gen_script, BIO *bio,
                             const SCRIPT_INFO *script_info)
 {
     int ok = 0;
@@ -429,31 +427,30 @@ static int GEN_SCRIPT_print(GEN_SCRIPT *gen_script,
     SRDR_init(srdr, gen_script->buf, gen_script->buf_len);
 
     if (script_info != NULL) {
-        BIO_printf(bio_err, "\nGenerated script for '%s':\n",
+        BIO_printf(bio, "\nGenerated script for '%s':\n",
                                script_info->name);
-        BIO_printf(bio_err, "\n--GENERATED-------------------------------------"
+        BIO_printf(bio, "\n--GENERATED-------------------------------------"
                   "----------------------\n");
-        BIO_printf(bio_err, "  # NAME:\n  #   %s\n",
+        BIO_printf(bio, "  # NAME:\n  #   %s\n",
                    script_info->name);
-        BIO_printf(bio_err, "  # SOURCE:\n  #   %s:%d\n",
+        BIO_printf(bio, "  # SOURCE:\n  #   %s:%d\n",
                    script_info->file, script_info->line);
-        BIO_printf(bio_err, "  # DESCRIPTION:\n  #   %s\n", script_info->desc);
+        BIO_printf(bio, "  # DESCRIPTION:\n  #   %s\n", script_info->desc);
     }
 
-
     for (i = 0; !was_end; ++i) {
-        BIO_printf(bio_err, "\n");
+        BIO_printf(bio, "\n");
 
-        if (!TEST_true(SRDR_print_one(srdr, i, &was_end)))
+        if (!TEST_true(SRDR_print_one(srdr, bio, i, &was_end)))
             goto err;
     }
 
     if (script_info != NULL) {
         const unsigned char *opc_start = srdr->cur;
 
-        BIO_printf(bio_err, "\n");
+        BIO_printf(bio, "\n");
         PRINT_OPC(+++);
-        BIO_printf(bio_err, "\n------------------------------------------------"
+        BIO_printf(bio, "\n------------------------------------------------"
                   "----------------------\n\n");
     }
 
@@ -462,15 +459,21 @@ err:
     return ok;
 }
 
-static void SCRIPT_INFO_print(SCRIPT_INFO *script_info, int error,
+static void SCRIPT_INFO_print(SCRIPT_INFO *script_info, BIO *bio, int error,
                               const char *msg)
 {
-    if (error)
-        TEST_error("%s: script '%s' (%s)",
+    if (bio == bio_err) {
+        if (error)
+            TEST_error("%s: script '%s' (%s)",
+                       msg, script_info->name, script_info->desc);
+        else
+            TEST_info("%s: script '%s' (%s)",
+                      msg, script_info->name, script_info->desc);
+    } else {
+        BIO_printf(bio, "%s: %s: script '%s' (%s)",
+                   error ? "ERROR" : "INFO",
                    msg, script_info->name, script_info->desc);
-    else
-        TEST_info("%s: script '%s' (%s)",
-                  msg, script_info->name, script_info->desc);
+    }
 }
 
 struct terp_st {
@@ -478,13 +481,16 @@ struct terp_st {
     const GEN_SCRIPT    *gen_script;
     SRDR                srdr;
     uint8_t             *stk_beg, *stk_cur, *stk_end;
+    BIO                 *debug_bio;
     FUNC_CTX            fctx;
     uint64_t            ops_executed;
+    int                 log_execute;
 };
 
 static int TERP_init(TERP *terp,
                      const SCRIPT_INFO *script_info,
-                     const GEN_SCRIPT *gen_script)
+                     const GEN_SCRIPT *gen_script,
+                     BIO *debug_bio)
 {
     terp->script_info       = script_info;
     terp->gen_script        = gen_script;
@@ -495,6 +501,8 @@ static int TERP_init(TERP *terp,
     terp->stk_cur           = NULL;
     terp->stk_end           = NULL;
     terp->ops_executed      = 0;
+    terp->log_execute       = 1;
+    terp->debug_bio         = debug_bio;
     return 1;
 }
 
@@ -551,12 +559,25 @@ static ossl_inline int TERP_stk_pop(TERP *terp,
     return 1;
 }
 
-static void TERP_print_stack(TERP *terp, const char *header)
+static void hexdump(BIO *bio, const void *buf, size_t buf_len)
 {
-    BIO_printf(bio_err, "\n");
-    test_output_memory(header, terp->stk_cur, terp->stk_end - terp->stk_cur);
-    BIO_printf(bio_err, "  (%zu bytes)\n", terp->stk_end - terp->stk_cur);
-    BIO_printf(bio_err, "\n");
+    const unsigned char *p = buf, *end = p + buf_len;
+
+    for (; p < end; ++p) {
+        BIO_printf(bio, "%02x", *p);
+    }
+
+    if (buf_len > 0)
+        BIO_printf(bio, "\n");
+}
+
+static void TERP_print_stack(TERP *terp, BIO *bio, const char *header)
+{
+    /* Avoid test_output_memory, need to buffer on local thread. */
+    BIO_printf(bio, "\n%s:\n", header);
+    hexdump(bio, terp->stk_cur, terp->stk_end - terp->stk_cur);
+    BIO_printf(bio, "  (%zu bytes)\n", terp->stk_end - terp->stk_cur);
+    BIO_printf(bio, "\n");
 }
 
 #define TERP_GET_OPERAND(v) GET_OPERAND(&terp->srdr, (v))
@@ -570,28 +591,29 @@ static int TERP_execute(TERP *terp)
     size_t op_num = SIZE_MAX;
     int in_debug_output = 0;
     size_t spin_count = 0;
+    BIO *debug_bio = terp->debug_bio;
 
     SRDR_init(&terp->srdr, terp->gen_script->buf, terp->gen_script->buf_len);
 
     for (;;) {
-        if (g_log_execute) {
+        if (terp->log_execute) {
             SRDR srdr_copy = terp->srdr;
 
             if (!in_debug_output) {
-                BIO_printf(bio_err, "\n--EXECUTION-----------------------------"
+                BIO_printf(debug_bio, "\n--EXECUTION-----------------------------"
                           "------------------------------\n");
                 in_debug_output = 1;
             }
 
             if (spin_count > 0)
-                BIO_printf(bio_err, "           \t\t(span %zu times)\n",
+                BIO_printf(debug_bio, "           \t\t(span %zu times)\n",
                            spin_count);
 
 
-            if (!TEST_true(SRDR_print_one(&srdr_copy, SIZE_MAX, NULL)))
+            if (!TEST_true(SRDR_print_one(&srdr_copy, debug_bio, SIZE_MAX, NULL)))
                 goto err;
 
-            BIO_printf(bio_err, "\n");
+            BIO_printf(debug_bio, "\n");
         }
 
         TERP_GET_OPERAND(opc);
@@ -671,7 +693,7 @@ stop:
     ok = 1;
 err:
     if (in_debug_output)
-        BIO_printf(bio_err, "----------------------------------------"
+        BIO_printf(debug_bio, "----------------------------------------"
                    "------------------------------\n");
 
     if (!ok)
@@ -681,35 +703,36 @@ err:
     return ok;
 }
 
-static int TERP_run(SCRIPT_INFO *script_info)
+static int TERP_run(SCRIPT_INFO *script_info, BIO *debug_bio)
 {
     int ok = 0, have_terp = 0;
     TERP terp;
     GEN_SCRIPT gen_script = {0};
 
-    SCRIPT_INFO_print(script_info, /*error=*/0, "generating script");
+    SCRIPT_INFO_print(script_info, debug_bio, /*error=*/0, "generating script");
 
     /* Generate the script by calling the generator function. */
     if (!TEST_true(GEN_SCRIPT_init(&gen_script, script_info))) {
-        SCRIPT_INFO_print(script_info, /*error=*/1,
+        SCRIPT_INFO_print(script_info, debug_bio, /*error=*/1,
                           "error while generating script");
         goto err;
     }
 
     /* Output the script for debugging purposes. */
-    if (!TEST_true(GEN_SCRIPT_print(&gen_script, script_info))) {
-        SCRIPT_INFO_print(script_info, /*error=*/1,
+    if (!TEST_true(GEN_SCRIPT_print(&gen_script, debug_bio, script_info))) {
+        SCRIPT_INFO_print(script_info, debug_bio, /*error=*/1,
                           "error while printing script");
         goto err;
     }
 
     /* Execute the script. */
-    if (!TEST_true(TERP_init(&terp, script_info, &gen_script)))
+    if (!TEST_true(TERP_init(&terp, script_info, &gen_script,
+                             debug_bio)))
         goto err;
 
     have_terp = 1;
 
-    SCRIPT_INFO_print(script_info, /*error=*/0, "executing script");
+    SCRIPT_INFO_print(script_info, debug_bio, /*error=*/0, "executing script");
 
     if (!TEST_true(TERP_execute(&terp)))
         goto err;
@@ -723,14 +746,14 @@ static int TERP_run(SCRIPT_INFO *script_info)
     ok = 1;
 err:
     if (have_terp) {
-        TERP_print_stack(&terp, "Final state of stack");
+        TERP_print_stack(&terp, debug_bio, "Final state of stack");
         TERP_cleanup(&terp);
     }
 
     GEN_SCRIPT_cleanup(&gen_script);
-    BIO_printf(bio_err, "Stats:\n  Ops executed: %16llu\n\n",
+    BIO_printf(debug_bio, "Stats:\n  Ops executed: %16llu\n\n",
                (unsigned long long)terp.ops_executed);
-    SCRIPT_INFO_print(script_info, /*error=*/!ok,
+    SCRIPT_INFO_print(script_info, debug_bio, /*error=*/!ok,
                       ok ? "completed" : "failed, exiting");
     return ok;
 }

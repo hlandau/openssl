@@ -104,6 +104,7 @@ typedef struct radix_thread_st {
 
     /* child thread spawn arguments */
     SCRIPT_INFO         *child_script_info;
+    BIO                 *debug_bio;
 
     /* m protects all of the below values */
     CRYPTO_MUTEX        *m;
@@ -169,6 +170,35 @@ static int RADIX_PROCESS_init(RADIX_PROCESS *rp, size_t node_idx, size_t process
     return 1;
 }
 
+static void RADIX_PROCESS_report_thread_results(RADIX_PROCESS *rp, BIO *bio)
+{
+    size_t i;
+    RADIX_THREAD *rt;
+    char *p;
+    long l;
+    char pfx_buf[64];
+
+    for (i = 1; i < (size_t)sk_RADIX_THREAD_num(rp->threads); ++i) {
+        rt = sk_RADIX_THREAD_value(rp->threads, i);
+
+        BIO_printf(bio, "\n====(n%zu/p%zu/t%zu)============================"
+                   "===========================\n"
+                   "Result for child thread with index %zu:\n",
+                   rp->node_idx, rp->process_idx, rt->thread_idx, rt->thread_idx);
+
+        BIO_snprintf(pfx_buf, sizeof(pfx_buf), "#  -T-%2zu:\t# ", rt->thread_idx);
+        BIO_set_prefix(bio_err, pfx_buf);
+
+        l = BIO_get_mem_data(rt->debug_bio, &p);
+        BIO_write(bio, p, l);
+        BIO_printf(bio, "\n");
+        BIO_set_prefix(bio_err, "# ");
+    }
+
+    BIO_printf(bio, "\n==========================================="
+               "===========================\n");
+}
+
 static int RADIX_THREAD_join(RADIX_THREAD *rt);
 
 static int RADIX_PROCESS_join_all_threads(RADIX_PROCESS *rp, int *testresult)
@@ -196,6 +226,8 @@ static int RADIX_PROCESS_join_all_threads(RADIX_PROCESS *rp, int *testresult)
     rp->thread_composite_testresult = composite_testresult;
     *testresult                     = composite_testresult;
     rp->done_join_all_threads       = 1;
+
+    RADIX_PROCESS_report_thread_results(rp, bio_err);
     return ok;
 }
 
@@ -314,6 +346,7 @@ static void RADIX_THREAD_free(RADIX_THREAD *rt)
         return;
 
     assert(rt->t == NULL);
+    BIO_free_all(rt->debug_bio);
     OPENSSL_free(rt->tmp_buf);
     ossl_crypto_mutex_free(&rt->m);
     OPENSSL_free(rt);
@@ -436,7 +469,14 @@ static int expect_slot_ssl(FUNC_CTX *fctx, size_t idx, SSL **p_ssl)
 
 static int RADIX_THREAD_worker_run(RADIX_THREAD *rt)
 {
-    return TERP_run(rt->child_script_info);
+    int ok = 0;
+
+    if (!TERP_run(rt->child_script_info, rt->debug_bio))
+        goto err;
+
+    ok = 1;
+err:
+    return ok;
 }
 
 static unsigned int RADIX_THREAD_worker_main(void *p)
@@ -479,13 +519,15 @@ DEF_FUNC(hf_spawn_thread)
     if (!TEST_ptr(child_rt = RADIX_THREAD_new(&radix_process)))
         return 0;
 
+    if (!TEST_ptr(child_rt->debug_bio = BIO_new(BIO_s_mem())))
+        goto err;
+
     ossl_crypto_mutex_lock(child_rt->m);
 
     child_rt->child_script_info = script_info;
     if (!TEST_ptr(child_rt->t = ossl_crypto_thread_native_start(RADIX_THREAD_worker_main,
                                                                 child_rt, 1))) {
         ossl_crypto_mutex_unlock(child_rt->m);
-        RADIX_THREAD_free(child_rt);
         goto err;
     }
 
@@ -493,6 +535,9 @@ DEF_FUNC(hf_spawn_thread)
     ok = 1;
 #endif
 err:
+    if (!ok)
+        RADIX_THREAD_free(child_rt);
+
     return ok;
 }
 
