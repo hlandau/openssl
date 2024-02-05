@@ -746,6 +746,10 @@ err:
                    terp->script_info->name, op_num);
         ERR_print_errors(terp->cfg.debug_bio);
         BIO_printf(debug_bio, "\n");
+    } else if (ERR_peek_last_error() != 0) {
+        TEST_info("WARNING: errors on error stack despite success:");
+        ERR_print_errors(terp->cfg.debug_bio);
+        BIO_printf(debug_bio, "\n");
     }
 
     return ok;
