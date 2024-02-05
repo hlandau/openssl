@@ -375,7 +375,8 @@ IF[{- !$disabled{tests} -}]
       INCLUDE[quic_multistream_test]=../include ../apps/include
       DEPEND[quic_multistream_test]=../libcrypto.a ../libssl.a libtestutil.a
 
-      SOURCE[quic_radix_test]=quic_radix_test.c helpers/ssltestlib.c $QUICTESTHELPERS
+      SOURCE[quic_radix_test]=quic_radix/quic_radix.c
+      SOURCE[quic_radix_test]=helpers/ssltestlib.c $QUICTESTHELPERS
       INCLUDE[quic_radix_test]=../include ../apps/include
       DEPEND[quic_radix_test]=../libcrypto.a ../libssl.a libtestutil.a
   ENDIF
