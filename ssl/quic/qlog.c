@@ -387,6 +387,7 @@ static void qlog_event_epilogue(QLOG *qlog)
     }
 
     ossl_json_object_end(&qlog->json);
+    ossl_qlog_flush(qlog); /* best effort */
 }
 
 int ossl_qlog_event_try_begin(QLOG *qlog,

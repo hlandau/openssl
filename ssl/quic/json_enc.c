@@ -100,6 +100,7 @@ static int wbuf_flush(struct json_write_buf *wbuf)
         total_written += written;
     }
 
+    (void)BIO_flush(wbuf->bio);
     wbuf->cur = 0;
     return 1;
 }
