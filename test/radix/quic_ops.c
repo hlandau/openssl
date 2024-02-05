@@ -16,13 +16,14 @@ DEF_FUNC(hf_new_ssl)
     int ok = 0;
     const char *name;
     SSL_CTX *ctx;
+    SSL_METHOD *method;
     SSL *ssl;
     uint64_t flags;
 
     F_POP2(name, flags);
 
-    /* TODO(QUIC SERVER): Allow this to create a server context. */
-    if (!TEST_ptr(ctx = SSL_CTX_new(OSSL_QUIC_client_method())))
+    method = (flags != 0) ? OSSL_QUIC_server_method() : OSSL_QUIC_client_method();
+    if (!TEST_ptr(ctx = SSL_CTX_new(method)))
         goto err;
 
     if (!TEST_ptr(ssl = SSL_new(ctx)))
@@ -635,6 +636,8 @@ err:
     OP_PUSH_P(name) OP_FUNC(hf_unbind)
 #define OP_NEW_SSL_C(name) \
     OP_PUSH_P(name); OP_PUSH_U64(0); OP_FUNC(hf_new_ssl)
+#define OP_NEW_SSL_S(name) \
+    OP_PUSH_P(name); OP_PUSH_U64(1); OP_FUNC(hf_new_ssl)
 #define OP_NEW_STREAM(conn_name, stream_name, flags) \
     OP_PUSH_P(conn_name) OP_PUSH_P(stream_name) \
     OP_PUSH_U64(flags) OP_PUSH_U64(0) OP_FUNC(hf_new_stream)
