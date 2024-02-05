@@ -15,6 +15,7 @@
 DEF_SCRIPT(simple_conn, "simple connection to server")
 {
     OP_SIMPLE_PAIR_CONN();
+    OP_WRITE_B(C, "apple");
 }
 
 /*

@@ -387,7 +387,7 @@ DEF_FUNC(hf_write)
 
     r = SSL_write_ex(ssl, buf, buf_len, &bytes_written);
     if (!TEST_true(r)
-        || check_consistent_want(ssl, r)
+        || !check_consistent_want(ssl, r)
         || !TEST_size_t_eq(bytes_written, buf_len))
         goto err;
 
@@ -410,7 +410,7 @@ DEF_FUNC(hf_write_ex2)
 
     r = SSL_write_ex2(ssl, buf, buf_len, flags, &bytes_written);
     if (!TEST_true(r)
-        || check_consistent_want(ssl, r)
+        || !check_consistent_want(ssl, r)
         || !TEST_size_t_eq(bytes_written, buf_len))
         goto err;
 
@@ -858,16 +858,17 @@ err:
     OP_FUNC(hf_set_incoming_stream_policy)
 #define OP_POP_ERR() OP_FUNC(hf_pop_err)
 #define OP_SHUTDOWN_WAIT(flags, error_code, reason) \
-    OP_PUSH_U64(flags) OP_PUSH_U64(error_code) OP_PUSH_P(reason) \
+    OP_PUSH_U64(flags); OP_PUSH_U64(error_code); OP_PUSH_P(reason) \
     OP_FUNC(hf_shutdown_wait)
 #define OP_CONCLUDE() \
     OP_FUNC(hf_conclude)
-#define OP_WRITE(buf, buf_len) \
-    OP_PUSH_P(buf) OP_PUSH_U64(buf_len) OP_FUNC(hf_write)
+#define OP_WRITE(name, buf, buf_len) \
+    OP_SELECT_SSL(0, name); \
+    OP_PUSH_P(buf); OP_PUSH_U64(buf_len); OP_FUNC(hf_write)
 #define OP_WRITE_EX2(buf, buf_len, flags) \
-    OP_PUSH_P(buf) OP_PUSH_U64(buf_len) \
-    OP_PUSH_U64(flags) OP_FUNC(hf_write_ex2)
-#define OP_WRITE_B(buf)   OP_WRITE((buf), sizeof(buf))
+    OP_PUSH_P(buf); OP_PUSH_U64(buf_len); \
+    OP_PUSH_U64(flags); OP_FUNC(hf_write_ex2)
+#define OP_WRITE_B(name, buf)   OP_WRITE(name, (buf), sizeof(buf))
 #define OP_WRITE_FAIL() \
     OP_FUNC(hf_write_fail)
 #define OP_READ_EXPECT(buf, buf_len) \
