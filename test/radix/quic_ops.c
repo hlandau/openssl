@@ -68,7 +68,7 @@ DEF_FUNC(hf_new_stream)
     if (!TEST_ptr(stream))
         goto err;
 
-    /* XXX; wait behaviour; XXX; */
+    /* TODO(QUIC RADIX): Implement wait behaviour */
 
     if (stream != NULL
         && !TEST_true(RADIX_PROCESS_set_ssl(RP(), stream_name, stream))) {
