@@ -14,10 +14,32 @@
 #include "internal/quic_ssl.h"
 
 /*
- * QUIC Bindings for the Test Framework
- * ============================================================================
+ * RADIX 6D QUIC Test Framework
+ * =============================================================================
+ *
+ * The radix test framework is a six-dimension script-driven facility to support
+ * execution of
+ *
+ *   multi-stream
+ *   multi-client
+ *   multi-server
+ *   multi-thread
+ *   multi-process
+ *   multi-node
+ *
+ * test vignettes for QUIC. Unlike the older multistream test framework, it does
+ * not assume a single client and a single server. Examples of vignettes
+ * designed to be supported by the radix test framework in future include:
+ *
+ *      single client    <-> single server
+ *      multiple clients <-> single server
+ *      single client    <-> multiple servers
+ *      multiple clients <-> multiple servers
+ *
+ * 'Multi-process' and 'multi-node' means there has been some consideration
+ * given to support of multi-process and multi-node testing in the future,
+ * though this is not currently supported.
  */
-
 
 /*
 

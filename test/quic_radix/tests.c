@@ -32,6 +32,7 @@ err:
 DEF_SCRIPT(simple_conn, "simple connection to server")
 {
     OP_PUSH_BUF("apple");
+    OP_LABEL("1");
     OP_PUSH_BUF("orange");
     OP_FUNC(some_helper);
 }

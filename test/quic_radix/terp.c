@@ -17,31 +17,8 @@
 static const char *cert_file, *key_file;
 
 /*
- * RADIX 6D Test Framework
- * =============================================================================
- *
- * The radix test framework is a six-dimension script-driven facility to support
- * execution of
- *
- *   multi-stream
- *   multi-client
- *   multi-server
- *   multi-thread
- *   multi-process
- *   multi-node
- *
- * test vignettes for QUIC. Unlike the older multistream test framework, it does
- * not assume a single client and a single server. Examples of vignettes
- * designed to be supported by the radix test framework in future include:
- *
- *      single client    <-> single server
- *      multiple clients <-> single server
- *      single client    <-> multiple servers
- *      multiple clients <-> multiple servers
- *
- * 'Multi-process' and 'multi-node' means there has been some consideration
- * given to support of multi-process and multi-node testing in the future,
- * though this is not currently supported.
+ * TERP - Test Executive Script Interpreter
+ * ========================================
  */
 typedef struct gen_ctx_st GEN_CTX;
 
@@ -153,8 +130,11 @@ enum {
     OPK_END,
     OPK_PUSH_P,
     OPK_PUSH_U64,
+    OPK_PUSH_LREF,
     //OPK_SELECT_OBJ,
     OPK_FUNC,
+    OPK_LABEL,
+    OPK_SPAWN,
 };
 
 static void *openc_alloc_space(GEN_CTX *ctx, size_t num_bytes);
@@ -199,6 +179,13 @@ ossl_unused static void opgen_FUNC(GEN_CTX *ctx, helper_func_t f,
     openc_p(ctx, (void *)f_name);
 }
 
+static void opgen_LABEL(GEN_CTX *ctx, const char *name)
+{
+    openc_opcode(ctx, OPK_LABEL);
+    openc_p(ctx, (void *)name);
+    // addrs[name] = x;
+}
+
 static void opgen_set_line(GEN_CTX *ctx, const char *file, int line)
 {
     ctx->cur_file = file;
@@ -218,10 +205,13 @@ static ossl_unused void opgen_fail(GEN_CTX *ctx, const char *msg)
 
 #define OPGEN(n)        (opgen_set_line(ctx, __FILE__, __LINE__), \
                          opgen_##n)
+#define OP_END()        OPGEN(END)      (ctx)
 #define OP_PUSH_P(v)    OPGEN(PUSH_P)   (ctx, (v))
 #define OP_PUSH_U64(v)  OPGEN(PUSH_U64) (ctx, (v))
 #define OP_PUSH_BUF(v)  OP_PUSH_P(v); OP_PUSH_U64(sizeof(v))
+#define OP_PUSH_LREF(v) OPGEN(PUSH_LREF)(ctx, (lref))
 #define OP_FUNC(f)      OPGEN(FUNC)     (ctx, (f), #f)
+#define OP_LABEL(name)  OPGEN(LABEL)    (ctx, (name))
 #define GEN_FAIL(msg)   OPGEN(fail)     (ctx, (msg))
 
 static void *openc_alloc_space(GEN_CTX *ctx, size_t num_bytes)
@@ -334,7 +324,7 @@ static ossl_inline int SRDR_get_operand(SRDR *srdr, void *buf, size_t buf_len)
 static void print_opc(size_t op_num, size_t offset, const char *name)
 {
     if (op_num != SIZE_MAX)
-        BIO_printf(bio_err, "%3zu:  %4zx>\t%-8s \t", op_num,
+        BIO_printf(bio_err, "%3zu-  %4zx>\t%-8s \t", op_num,
                    offset, name);
     else
         BIO_printf(bio_err, "      %4zx>\t%-8s \t",
@@ -391,7 +381,17 @@ static int SRDR_print_one(SRDR *srdr, size_t i, int *was_end)
 
             PRINT_OPC(FUNC);
             memcpy(&x, &v, sizeof(x) < sizeof(v) ? sizeof(x) : sizeof(v));
-            BIO_printf(bio_err, "%20p (%s)", x, (const char *)f_name);
+            BIO_printf(bio_err, "%s", (const char *)f_name);
+        }
+        break;
+    case OPK_LABEL:
+        {
+            void *l_name;
+
+            GET_OPERAND(srdr, l_name);
+
+            BIO_printf(bio_err, "\n%s:\n", (const char *)l_name);
+            PRINT_OPC(LABEL);
         }
         break;
     default:
@@ -473,13 +473,14 @@ static int TERP_init(TERP *terp,
                      const SCRIPT_INFO *script_info,
                      const GEN_SCRIPT *gen_script)
 {
-    terp->script_info   = script_info;
-    terp->gen_script    = gen_script;
-    terp->fctx.terp     = terp;
-    terp->stk_beg       = NULL;
-    terp->stk_cur       = NULL;
-    terp->stk_end       = NULL;
-    terp->ops_executed  = 0;
+    terp->script_info       = script_info;
+    terp->gen_script        = gen_script;
+    terp->fctx.terp         = terp;
+    terp->fctx.spin_again   = 0;
+    terp->stk_beg           = NULL;
+    terp->stk_cur           = NULL;
+    terp->stk_end           = NULL;
+    terp->ops_executed      = 0;
     return 1;
 }
 
@@ -599,6 +600,14 @@ spin_again:
 
                 TERP_GET_OPERAND(v);
                 TERP_STK_PUSH(terp, v);
+            }
+            break;
+        case OPK_LABEL:
+            {
+                const char *l_name;
+
+                TERP_GET_OPERAND(l_name);
+                /* no-op */
             }
             break;
         case OPK_FUNC:
