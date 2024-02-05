@@ -289,7 +289,9 @@ static void report_obj(RADIX_OBJ *obj, void *arg)
     SSL *ssl = obj->ssl;
 
     BIO_printf(bio, "      - %-16s @ %p\n", obj->name, (void *)obj->ssl);
+    ERR_set_mark();
     report_ssl(ssl, bio, "          ");
+    ERR_pop_to_mark();
 }
 
 static void RADIX_THREAD_report_state(RADIX_THREAD *rt, BIO *bio)
