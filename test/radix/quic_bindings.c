@@ -218,14 +218,17 @@ static void report_ssl_state(BIO *bio, const char *pfx, int is_write,
 static void report_ssl(SSL *ssl, BIO *bio, const char *pfx)
 {
     const char *type = "SSL";
-    int is_quic = SSL_is_quic(ssl), is_conn = 0;
+    int is_quic = SSL_is_quic(ssl), is_conn = 0, is_listener = 0;
     SSL_CONN_CLOSE_INFO cc_info = {0};
     const char *e_str, *f_str;
 
     if (is_quic) {
         is_conn = SSL_is_connection(ssl);
+        is_listener = SSL_is_listener(ssl);
 
-        if (is_conn)
+        if (is_listener)
+            type = "QLSO";
+        else if (is_conn)
             type = "QCSO";
         else
             type = "QSSO";
@@ -258,7 +261,7 @@ static void report_ssl(SSL *ssl, BIO *bio, const char *pfx)
                    cc_info.reason != NULL ? cc_info.reason : "-");
     }
 
-    if (is_quic) {
+    if (is_quic && !is_listener) {
         uint64_t stream_id = SSL_get_stream_id(ssl), rec, wec;
         int rstate, wstate;
 

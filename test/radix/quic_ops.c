@@ -16,18 +16,25 @@ DEF_FUNC(hf_new_ssl)
     int ok = 0;
     const char *name;
     SSL_CTX *ctx;
-    SSL_METHOD *method;
+    const SSL_METHOD *method;
     SSL *ssl;
     uint64_t flags;
+    int is_server;
 
     F_POP2(name, flags);
 
-    method = (flags != 0) ? OSSL_QUIC_server_method() : OSSL_QUIC_client_method();
+    is_server = (flags != 0);
+    method = is_server ? OSSL_QUIC_server_method() : OSSL_QUIC_client_method();
     if (!TEST_ptr(ctx = SSL_CTX_new(method)))
         goto err;
 
-    if (!TEST_ptr(ssl = SSL_new(ctx)))
-        goto err;
+    if (is_server) {
+        if (!TEST_ptr(ssl = SSL_new_listener(ctx, 0)))
+            goto err;
+    } else {
+        if (!TEST_ptr(ssl = SSL_new(ctx)))
+            goto err;
+    }
 
     SSL_CTX_free(ctx);
 
@@ -35,6 +42,22 @@ DEF_FUNC(hf_new_ssl)
         SSL_free(ssl);
         goto err;
     }
+
+    ok = 1;
+err:
+    return ok;
+}
+
+DEF_FUNC(hf_listen)
+{
+    int ok = 0, r;
+    SSL *ssl;
+
+    REQUIRE_SSL(ssl);
+
+    r = SSL_listen(ssl);
+    if (!TEST_true(r))
+        goto err;
 
     ok = 1;
 err:
@@ -632,12 +655,20 @@ err:
     return ok;
 }
 
+#define OP_SELECT_SSL(slot, name) \
+    OP_PUSH_U64(slot); OP_PUSH_P(#name); OP_FUNC(hf_select_ssl)
+#define OP_CLEAR_SLOT(slot) \
+    OP_PUSH_U64(slot) OP_FUNC(hf_clear_slot)
 #define OP_UNBIND(name) \
     OP_PUSH_P(name) OP_FUNC(hf_unbind)
+#define OP_LISTEN(name) \
+    OP_SELECT_SSL(0, name); OP_FUNC(hf_listen)
 #define OP_NEW_SSL_C(name) \
-    OP_PUSH_P(name); OP_PUSH_U64(0); OP_FUNC(hf_new_ssl)
-#define OP_NEW_SSL_S(name) \
-    OP_PUSH_P(name); OP_PUSH_U64(1); OP_FUNC(hf_new_ssl)
+    OP_PUSH_P(#name); OP_PUSH_U64(0); OP_FUNC(hf_new_ssl)
+#define OP_NEW_SSL_L(name) \
+    OP_PUSH_P(#name); OP_PUSH_U64(1); OP_FUNC(hf_new_ssl)
+#define OP_NEW_SSL_L_LISTEN(name) \
+    OP_NEW_SSL_L(name); OP_LISTEN(name)
 #define OP_NEW_STREAM(conn_name, stream_name, flags) \
     OP_PUSH_P(conn_name) OP_PUSH_P(stream_name) \
     OP_PUSH_U64(flags) OP_PUSH_U64(0) OP_FUNC(hf_new_stream)
@@ -696,9 +727,5 @@ err:
 #define OP_EXPECT_STREAM_ID(expected) \
     OP_PUSH_U64(expected) OP_FUNC(hf_expect_stream_id)
 
-#define OP_SELECT_SSL(slot, name) \
-    OP_PUSH_U64(slot) OP_PUSH_P(name) OP_FUNC(hf_select_ssl)
-#define OP_CLEAR_SLOT(slot) \
-    OP_PUSH_U64(slot) OP_FUNC(hf_clear_slot)
 #define OP_SKIP_TIME(ms) \
     OP_PUSH_U64(ms) OP_FUNC(hf_skip_time)
