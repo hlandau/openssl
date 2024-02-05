@@ -500,7 +500,6 @@ DEF_FUNC(hf_read_expect)
     r = SSL_read_ex(ssl, RT()->tmp_buf + RT()->tmp_buf_offset,
                     buf_len - RT()->tmp_buf_offset,
                     &bytes_read);
-    if (bytes_read)fprintf(stderr, "# br=%zu\n", bytes_read);
     if (!TEST_true(check_consistent_want(ssl, r)))
         goto err;
 
@@ -854,7 +853,6 @@ DEF_FUNC(hf_set_peer_addr_from)
     if (!TEST_true(BIO_dgram_set_peer(dst_bio, src_addr)))
         goto err;
 
-    //fprintf(stderr, "#  to 0x%x, %d\n", ntohl(*(uint32_t*)&((struct sockaddr_in*)src_addr)->sin_addr), ntohs(BIO_ADDR_rawport(src_addr)));
     ok = 1;
 err:
     BIO_ADDR_free(src_addr);
