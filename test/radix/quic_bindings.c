@@ -43,26 +43,6 @@
  */
 
 /*
-
-Requirements:
-
-  - multiple SSL objects, assign names
-
-  - async. expect wait etc., timeouts
-
-  - multithreading
-
-
-global context:
-
-    ssl_objects: (const char *) -> (SSL *)
-
-
-
-
- */
-
-/*
  * An object is something associated with a name in the process-level state. The
  * process-level state primarily revolves around a global dictionary of SSL
  * objects.
@@ -71,6 +51,7 @@ typedef struct radix_obj_st {
     char                *name;  /* owned, zero-terminated */
     SSL                 *ssl;   /* owns one reference */
     unsigned int        registered      : 1; /* in LHASH? */
+    unsigned int        active          : 1; /* tick? */
 } RADIX_OBJ;
 
 DEFINE_LHASH_OF_EX(RADIX_OBJ);
@@ -115,6 +96,8 @@ typedef struct radix_thread_st {
     CRYPTO_MUTEX        *m;
     int                 done;
     int                 testresult; /* valid if done */
+
+    uint64_t            scratch0;
 } RADIX_THREAD;
 
 DEFINE_STACK_OF(RADIX_THREAD)
@@ -248,7 +231,7 @@ static void report_ssl(SSL *ssl, BIO *bio, const char *pfx)
             f_str = "?";
 
         BIO_printf(bio, "%sConnection is closed: %s(%llu)/%s(%llu), "
-                   "%s, %s, reason: \"%s\"",
+                   "%s, %s, reason: \"%s\"\n",
                    pfx,
                    e_str,
                    (unsigned long long)cc_info.error_code,
@@ -644,9 +627,22 @@ ossl_unused static void radix_skip_time(OSSL_TIME t)
     ossl_crypto_mutex_unlock(RP()->gm);
 }
 
+static void per_op_tick_obj(RADIX_OBJ *obj)
+{
+    if (obj->active)
+        SSL_handle_events(obj->ssl);
+}
+
+static int do_per_op(TERP *terp, void *arg)
+{
+    lh_RADIX_OBJ_doall(RP()->objs, per_op_tick_obj);
+    return 1;
+}
+
 static int bindings_adjust_terp_config(TERP_CONFIG *cfg)
 {
-    cfg->now_cb = get_time;
+    cfg->now_cb     = get_time;
+    cfg->per_op_cb  = do_per_op;
     return 1;
 }
 
@@ -713,6 +709,20 @@ static unsigned int RADIX_THREAD_worker_main(void *p)
 
     radix_thread_cleanup();
     return 1;
+}
+
+static void radix_activate_obj(RADIX_OBJ *obj)
+{
+    if (obj != NULL)
+        obj->active = 1;
+}
+
+static void radix_activate_slot(size_t idx)
+{
+    if (idx >= NUM_SLOTS)
+        return;
+
+    radix_activate_obj(RT()->slot[idx]);
 }
 
 DEF_FUNC(hf_spawn_thread)

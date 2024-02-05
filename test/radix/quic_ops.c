@@ -1,3 +1,10 @@
+#include <netinet/in.h>
+
+static const unsigned char alpn_ossltest[] = {
+    /* "\x08ossltest" (hex for EBCDIC resilience) */
+    0x08, 0x6f, 0x73, 0x73, 0x6c, 0x74, 0x65, 0x73, 0x74
+};
+
 DEF_FUNC(hf_unbind)
 {
     int ok = 0;
@@ -11,18 +18,13 @@ err:
     return ok;
 }
 
-
 static int ssl_ctx_select_alpn(SSL *ssl,
                                const unsigned char **out, unsigned char *out_len,
                                const unsigned char *in, unsigned int in_len,
                                void *arg)
 {
-    static const unsigned char alpn[] = {
-        8, 'o', 's', 's', 'l', 't', 'e', 's', 't'
-    };
-
     if (SSL_select_next_proto((unsigned char **)out, out_len,
-                              alpn, sizeof(alpn), in, in_len)
+                              alpn_ossltest, sizeof(alpn_ossltest), in, in_len)
             != OPENSSL_NPN_NEGOTIATED)
         return SSL_TLSEXT_ERR_ALERT_FATAL;
 
@@ -44,6 +46,75 @@ static int ssl_ctx_configure(SSL_CTX *ctx, int is_server)
         return 0;
 
     SSL_CTX_set_alpn_select_cb(ctx, ssl_ctx_select_alpn, NULL);
+    return 1;
+}
+
+static int ssl_create_bound_socket(uint16_t listen_port,
+                                   int *p_fd, uint16_t *p_result_port)
+{
+    int ok = 0;
+    int fd = -1;
+    BIO_ADDR *addr = NULL;
+    union BIO_sock_info_u info;
+    struct in_addr ina = { htonl(INADDR_LOOPBACK) };
+
+    fd = BIO_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP, 0);
+    if (!TEST_int_ge(fd, 0))
+        goto err;
+
+    if (!TEST_true(BIO_socket_nbio(fd, 1)))
+        goto err;
+
+    if (!TEST_ptr(addr = BIO_ADDR_new()))
+        goto err;
+
+    if (!TEST_true(BIO_ADDR_rawmake(addr, AF_INET,
+                                    &ina, sizeof(ina), 0)))
+        goto err;
+
+    if (!TEST_true(BIO_bind(fd, addr, 0)))
+        goto err;
+
+    info.addr = addr;
+    if (!TEST_true(BIO_sock_info(fd, BIO_SOCK_INFO_ADDRESS, &info)))
+        goto err;
+
+    if (!TEST_int_gt(BIO_ADDR_rawport(addr), 0))
+        goto err;
+
+    ok = 1;
+err:
+    if (!ok && fd >= 0)
+        BIO_closesocket(fd);
+    else if (ok) {
+        *p_fd = fd;
+        if (p_result_port != NULL)
+            *p_result_port = BIO_ADDR_rawport(addr);
+    }
+    BIO_ADDR_free(addr);
+    return ok;
+}
+
+static int ssl_attach_bio_dgram(SSL *ssl,
+                                uint16_t local_port, uint16_t *actual_port)
+{
+    int s_fd = -1;
+    BIO *bio;
+
+    if (!TEST_true(ssl_create_bound_socket(local_port, &s_fd, actual_port)))
+        return 0;
+
+    if (!TEST_ptr(bio = BIO_new_dgram(s_fd, BIO_CLOSE))) {
+        BIO_closesocket(s_fd);
+        return 0;
+    }
+
+    SSL_set0_rbio(ssl, bio);
+    if (!TEST_true(BIO_up_ref(bio)))
+        return 0;
+
+    SSL_set0_wbio(ssl, bio);
+
     return 1;
 }
 
@@ -75,6 +146,9 @@ DEF_FUNC(hf_new_ssl)
             goto err;
     }
 
+    if (!TEST_true(ssl_attach_bio_dgram(ssl, 0, NULL)))
+        goto err;
+
     if (!TEST_true(RADIX_PROCESS_set_ssl(RP(), name, ssl))) {
         SSL_free(ssl);
         goto err;
@@ -98,6 +172,7 @@ DEF_FUNC(hf_listen)
     if (!TEST_true(r))
         goto err;
 
+    radix_activate_slot(0);
     ok = 1;
 err:
     return ok;
@@ -437,20 +512,23 @@ DEF_FUNC(hf_connect_wait)
     REQUIRE_SSL(ssl);
 
     /* if not started */
-    if (0) {
-        static const unsigned char alpn_buf[] = {
-            /* "\x08ossltest" (hex for EBCDIC resilience) */
-            0x08, 0x6f, 0x73, 0x73, 0x6c, 0x74, 0x65, 0x73, 0x74
-        };
+    if (RT()->scratch0 == 0) {
+        if (!TEST_true(SSL_set_blocking_mode(ssl, 0)))
+            return 0;
+
+        SSL_CONN_CLOSE_INFO cc_info = {0};
+        if (!TEST_false(SSL_get_conn_close_info(ssl, &cc_info, sizeof(cc_info))))
+            goto err;
 
         /* 0 is the success case for SSL_set_alpn_protos(). */
-        if (!TEST_false(SSL_set_alpn_protos(ssl, alpn_buf, sizeof(alpn_buf))))
+        if (!TEST_false(SSL_set_alpn_protos(ssl, alpn_ossltest,
+                                            sizeof(alpn_ossltest))))
             goto err;
     }
 
-    /* TODO connect started */
-
+    RT()->scratch0 = 1; /* connect started */
     ret = SSL_connect(ssl);
+    radix_activate_slot(0);
     if (!TEST_true(check_consistent_want(ssl, ret)))
         goto err;
 
@@ -464,6 +542,7 @@ DEF_FUNC(hf_connect_wait)
 
     ok = 1;
 err:
+    RT()->scratch0 = 0;
     return ok;
 }
 
@@ -694,8 +773,49 @@ err:
     return ok;
 }
 
+DEF_FUNC(hf_set_peer_addr_from)
+{
+    int ok = 0;
+    SSL *dst_ssl, *src_ssl;
+    BIO *dst_bio, *src_bio;
+    int src_fd = -1;
+    union BIO_sock_info_u src_info;
+    BIO_ADDR *src_addr = NULL;
+
+    REQUIRE_SSL_N(0, dst_ssl);
+    REQUIRE_SSL_N(1, src_ssl);
+    dst_bio = SSL_get_rbio(dst_ssl);
+    src_bio = SSL_get_rbio(src_ssl);
+    if (!TEST_ptr(dst_bio) || !TEST_ptr(src_bio))
+        goto err;
+
+    if (!TEST_ptr(src_addr = BIO_ADDR_new()))
+        goto err;
+
+    if (!TEST_true(BIO_get_fd(src_bio, &src_fd))
+        || !TEST_int_ge(src_fd, 0))
+        goto err;
+
+    src_info.addr = src_addr;
+    if (!TEST_true(BIO_sock_info(src_fd, BIO_SOCK_INFO_ADDRESS, &src_info))
+        || !TEST_int_ge(ntohs(BIO_ADDR_rawport(src_addr)), 0))
+        goto err;
+
+    /*
+     * Could use SSL_set_initial_peer_addr here, but set it on the
+     * BIO_s_datagram instead and make sure we pick it up automatically.
+     */
+    if (!TEST_true(BIO_dgram_set_peer(dst_bio, src_addr)))
+        goto err;
+
+    //fprintf(stderr, "#  to 0x%x, %d\n", ntohl(*(uint32_t*)&((struct sockaddr_in*)src_addr)->sin_addr), ntohs(BIO_ADDR_rawport(src_addr)));
+    ok = 1;
+err:
+    return ok;
+}
+
 #define OP_SELECT_SSL(slot, name) \
-    OP_PUSH_U64(slot); OP_PUSH_P(#name); OP_FUNC(hf_select_ssl)
+    OP_PUSH_U64(slot); OP_PUSH_PZ(#name); OP_FUNC(hf_select_ssl)
 #define OP_CLEAR_SLOT(slot) \
     OP_PUSH_U64(slot) OP_FUNC(hf_clear_slot)
 #define OP_CONNECT_WAIT(name) \
@@ -705,14 +825,19 @@ err:
 #define OP_LISTEN(name) \
     OP_SELECT_SSL(0, name); OP_FUNC(hf_listen)
 #define OP_NEW_SSL_C(name) \
-    OP_PUSH_P(#name); OP_PUSH_U64(0); OP_FUNC(hf_new_ssl)
+    OP_PUSH_PZ(#name); OP_PUSH_U64(0); OP_FUNC(hf_new_ssl)
 #define OP_NEW_SSL_L(name) \
-    OP_PUSH_P(#name); OP_PUSH_U64(1); OP_FUNC(hf_new_ssl)
+    OP_PUSH_PZ(#name); OP_PUSH_U64(1); OP_FUNC(hf_new_ssl)
 #define OP_NEW_SSL_L_LISTEN(name) \
     OP_NEW_SSL_L(name); OP_LISTEN(name)
-#define OP_SIMPLE_PAIR_CONN()   \
-    OP_NEW_SSL_L_LISTEN(L);     \
-    OP_NEW_SSL_C(C);            \
+#define OP_SET_PEER_ADDR_FROM(dst_name, src_name)   \
+    OP_SELECT_SSL(0, dst_name);                     \
+    OP_SELECT_SSL(1, src_name);                     \
+    OP_FUNC(hf_set_peer_addr_from)
+#define OP_SIMPLE_PAIR_CONN()       \
+    OP_NEW_SSL_L_LISTEN(L);         \
+    OP_NEW_SSL_C(C);                \
+    OP_SET_PEER_ADDR_FROM(C, L);    \
     OP_CONNECT_WAIT(C)
 #define OP_NEW_STREAM(conn_name, stream_name, flags) \
     OP_PUSH_P(conn_name) OP_PUSH_P(stream_name) \
