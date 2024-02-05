@@ -180,6 +180,49 @@ err:
     return 0;
 }
 
+static void report_obj(RADIX_OBJ *obj, void *arg)
+{
+    BIO *bio = arg;
+    BIO_printf(bio, "    NAME: '%s'\n", obj->name);
+    BIO_printf(bio, "    SSL:  %p\n\n", (void *)obj->ssl);
+}
+
+static void RADIX_THREAD_report_state(RADIX_THREAD *rt, BIO *bio)
+{
+    size_t i;
+
+    BIO_printf(bio, "  Slots:\n");
+    for (i = 0; i < NUM_SLOTS; ++i)
+        if (rt->slot[i] == NULL)
+            BIO_printf(bio, "  %3zu) <NULL>\n", i);
+        else
+            BIO_printf(bio, "  %3zu) '%s' (SSL: %p)\n", i,
+                       rt->slot[i]->name,
+                       (void *)rt->ssl[i]);
+}
+
+static void RADIX_PROCESS_report_state(RADIX_PROCESS *rp, BIO *bio,
+                                       int verbose)
+{
+    BIO_printf(bio, "Final process state for node %zu, process %zu:\n",
+               rp->node_idx, rp->process_idx);
+
+    BIO_printf(bio, "  Threads (incl. main):        %zu\n",
+               rp->next_thread_idx);
+    BIO_printf(bio, "  Time slip:                   %zu ms\n",
+               ossl_time2ms(rp->time_slip));
+
+    BIO_printf(bio, "  Objects:\n");
+    lh_RADIX_OBJ_doall_arg(rp->objs, report_obj, bio);
+
+    if (verbose)
+        RADIX_THREAD_report_state(sk_RADIX_THREAD_value(rp->threads, 0),
+                                  bio_err);
+
+    BIO_printf(bio, "\n==========================================="
+               "===========================\n");
+}
+
 static void RADIX_PROCESS_report_thread_results(RADIX_PROCESS *rp, BIO *bio)
 {
     size_t i;
@@ -187,9 +230,15 @@ static void RADIX_PROCESS_report_thread_results(RADIX_PROCESS *rp, BIO *bio)
     char *p;
     long l;
     char pfx_buf[64];
+    int rt_testresult;
 
     for (i = 1; i < (size_t)sk_RADIX_THREAD_num(rp->threads); ++i) {
         rt = sk_RADIX_THREAD_value(rp->threads, i);
+
+        ossl_crypto_mutex_lock(rt->m);
+        assert(rt->done);
+        rt_testresult = rt->testresult;
+        ossl_crypto_mutex_unlock(rt->m);
 
         BIO_printf(bio, "\n====(n%zu/p%zu/t%zu)============================"
                    "===========================\n"
@@ -203,6 +252,10 @@ static void RADIX_PROCESS_report_thread_results(RADIX_PROCESS *rp, BIO *bio)
         BIO_write(bio, p, l);
         BIO_printf(bio, "\n");
         BIO_set_prefix(bio_err, "# ");
+        BIO_printf(bio, "==> Child thread with index %zu exited with %d\n",
+                   rt->thread_idx, rt_testresult);
+        if (!rt_testresult)
+            RADIX_THREAD_report_state(rt, bio);
     }
 
     BIO_printf(bio, "\n==========================================="
@@ -225,6 +278,8 @@ static int RADIX_PROCESS_join_all_threads(RADIX_PROCESS *rp, int *testresult)
 
     for (i = 1; i < (size_t)sk_RADIX_THREAD_num(rp->threads); ++i) {
         rt = sk_RADIX_THREAD_value(rp->threads, i);
+
+        BIO_printf(bio_err, "==> Joining thread %zu\n", i);
 
         if (!TEST_true(RADIX_THREAD_join(rt)))
             ok = 0;
@@ -438,19 +493,27 @@ static int bindings_process_init(size_t node_idx, size_t process_idx)
     return radix_thread_init(rt);
 }
 
-static int bindings_process_finish(void)
+static int bindings_process_finish(int testresult_main)
 {
-    int testresult;
+    int testresult, testresult_child;
 
-    if (!TEST_true(RADIX_PROCESS_join_all_threads(&radix_process, &testresult)))
+    if (!TEST_true(RADIX_PROCESS_join_all_threads(&radix_process,
+                                                  &testresult_child)))
         return 0;
 
-    if (!TEST_true(testresult))
-        return 0;
-
+    testresult = testresult_main && testresult_child;
+    RADIX_PROCESS_report_state(&radix_process, bio_err,
+                               /*verbose=*/!testresult);
     radix_thread_cleanup(); /* cleanup main thread */
     RADIX_PROCESS_cleanup(&radix_process);
-    return 1;
+
+    if (testresult)
+        BIO_printf(bio_err, "==> OK\n\n");
+    else
+        BIO_printf(bio_err, "==> ERROR (main=%d, children=%d)\n\n",
+                   testresult_main, testresult_child);
+
+    return testresult;
 }
 
 #define RP()    (&radix_process)

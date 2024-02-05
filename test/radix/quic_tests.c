@@ -38,6 +38,17 @@ err:
     return ok;
 }
 
+DEF_FUNC(push_error) {
+    ERR_raise_data(ERR_LIB_SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED, "oh no, don't call this");
+    ERR_raise_data(ERR_LIB_SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED, "no really");
+    return 0;
+}
+
+DEF_SCRIPT(err_test, "error test")
+{
+    OP_FUNC(push_error);
+}
+
 DEF_SCRIPT(simple_conn, "simple connection to server")
 {
     OP_PUSH_BUF("apple");
@@ -62,6 +73,7 @@ DEF_SCRIPT(simple_thread, "threaded test")
  * ============================================================================
  */
 static SCRIPT_INFO *const scripts[] = {
+    USE(err_test)
     USE(simple_conn)
     USE(simple_thread)
 };

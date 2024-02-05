@@ -15,7 +15,7 @@ OPT_TEST_DECLARE_USAGE("cert_file key_file\n")
  *   static SCRIPT_INFO *const scripts[];
  *
  *   int bindings_process_init(size_t node_idx, size_t process_idx);
- *   void bindings_process_finish();
+ *   void bindings_process_finish(int testresult);
  *   int bindings_adjust_terp_config(TERP_CONFIG *cfg);
  *
  */
@@ -35,7 +35,7 @@ static int test_script(int idx)
 
     testresult = TERP_run(script_info, &cfg);
 
-    if (!TEST_true(bindings_process_finish()))
+    if (bindings_process_finish(testresult))
         testresult = 0;
 
     return testresult;

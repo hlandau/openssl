@@ -699,6 +699,9 @@ spin_again:
                     if (!TEST_int_eq(ret, F_RET_SKIP_REST))
                         goto err;
 
+                    if (terp->log_execute)
+                        BIO_printf(terp->cfg.debug_bio, "           \t\t(skipping)\n");
+
                     terp->fctx.skip_rest = 0;
                     goto stop;
                 } else if (terp->fctx.spin_again) {
@@ -708,9 +711,14 @@ spin_again:
                     terp->fctx.spin_again = 0;
                     TERP_SPIN_AGAIN();
                 } else {
-                    if (!TEST_int_eq(ret, 1)
-                        || !TEST_false(terp->fctx.spin_again))
+                    if (!TEST_false(terp->fctx.spin_again))
                         goto err;
+
+                    if (ret != 1) {
+                        TEST_error("op %zu (FUNC %s) failed with return value %d",
+                                   op_num, (const char *)f_name, ret);
+                        goto err;
+                    }
                 }
             }
             break;
@@ -727,9 +735,12 @@ err:
         BIO_printf(debug_bio, "----------------------------------------"
                    "------------------------------\n");
 
-    if (!ok)
-        TEST_error("FAILED while executing script: %s at op %zu",
+    if (!ok) {
+        TEST_error("FAILED while executing script: %s at op %zu, error stack:",
                    terp->script_info->name, op_num);
+        ERR_print_errors(terp->cfg.debug_bio);
+        BIO_printf(debug_bio, "\n");
+    }
 
     return ok;
 }
@@ -765,7 +776,7 @@ static int TERP_run(SCRIPT_INFO *script_info, TERP_CONFIG *cfg)
 
     SCRIPT_INFO_print(script_info, debug_bio, /*error=*/0, "executing script");
 
-    if (!TEST_true(TERP_execute(&terp)))
+    if (!TERP_execute(&terp))
         goto err;
 
     if (terp.stk_end - terp.stk_cur != 0) {
