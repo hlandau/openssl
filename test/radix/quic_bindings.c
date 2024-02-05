@@ -165,6 +165,7 @@ static int RADIX_PROCESS_init(RADIX_PROCESS *rp, size_t node_idx, size_t process
     rp->node_idx                = node_idx;
     rp->process_idx             = process_idx;
     rp->done_join_all_threads   = 0;
+    rp->next_thread_idx         = 0;
     return 1;
 }
 
@@ -204,14 +205,23 @@ static void cleanup_one(RADIX_OBJ *obj)
     RADIX_OBJ_free(obj);
 }
 
+static void RADIX_THREAD_free(RADIX_THREAD *rt);
+
 static void RADIX_PROCESS_cleanup(RADIX_PROCESS *rp)
 {
+    size_t i;
+
     assert(rp->done_join_all_threads);
+
+    for (i = 0; i < (size_t)sk_RADIX_THREAD_num(rp->threads); ++i)
+        RADIX_THREAD_free(sk_RADIX_THREAD_value(rp->threads, i));
+
+    sk_RADIX_THREAD_free(rp->threads);
+    rp->threads = NULL;
+
     lh_RADIX_OBJ_doall(rp->objs, cleanup_one);
     lh_RADIX_OBJ_free(rp->objs);
     rp->objs = NULL;
-    sk_RADIX_THREAD_free(rp->threads);
-    rp->threads = NULL;
 }
 
 static RADIX_OBJ *RADIX_PROCESS_get_obj(RADIX_PROCESS *rp, const char *name)
@@ -278,7 +288,7 @@ static RADIX_THREAD *RADIX_THREAD_new(RADIX_PROCESS *rp)
     RADIX_THREAD *rt;
 
     if (!TEST_ptr(rp)
-        || !TEST_ptr(rt = OPENSSL_zalloc(sizeof(rt))))
+        || !TEST_ptr(rt = OPENSSL_zalloc(sizeof(*rt))))
         return 0;
 
     rt->rp          = rp;
@@ -294,7 +304,7 @@ static RADIX_THREAD *RADIX_THREAD_new(RADIX_PROCESS *rp)
     }
 
     rt->thread_idx  = rp->next_thread_idx++;
-    assert(rt->thread_idx == (size_t)sk_RADIX_THREAD_num(rp->threads));
+    assert(rt->thread_idx + 1 == (size_t)sk_RADIX_THREAD_num(rp->threads));
     return rt;
 }
 
@@ -328,7 +338,7 @@ static int RADIX_THREAD_join(RADIX_THREAD *rt)
 static RADIX_PROCESS        radix_process;
 static CRYPTO_THREAD_LOCAL  radix_thread;
 
-static void radix_thread_cleanup(void *p)
+static void radix_thread_cleanup_tl(void *p)
 {
     /* Should already have been cleaned up. */
     if (!TEST_ptr_null(p))
@@ -340,47 +350,19 @@ static RADIX_THREAD *radix_get_thread(void)
     return CRYPTO_THREAD_get_local(&radix_thread);
 }
 
-static int bindings_process_init(size_t node_idx, size_t process_idx)
+static int radix_thread_init(RADIX_THREAD *rt)
 {
-    if (!TEST_true(RADIX_PROCESS_init(&radix_process, node_idx, process_idx)))
+    if (!TEST_ptr(rt)
+        || !TEST_ptr_null(CRYPTO_THREAD_get_local(&radix_thread)))
         return 0;
 
-    if (!TEST_true(CRYPTO_THREAD_init_local(&radix_thread,
-                                            radix_thread_cleanup)))
+    if (!TEST_true(CRYPTO_THREAD_set_local(&radix_thread, rt)))
         return 0;
 
     return 1;
 }
 
-static int bindings_thread_init_with(RADIX_THREAD *rt)
-{
-    int did_alloc = 0;
-
-    if (!TEST_ptr_null(CRYPTO_THREAD_get_local(&radix_thread)))
-        return 0;
-
-    if (rt == NULL) {
-        did_alloc = 1;
-        if (!TEST_ptr(rt = RADIX_THREAD_new(&radix_process)))
-            return 0;
-    }
-
-    if (!TEST_true(CRYPTO_THREAD_set_local(&radix_thread, rt))) {
-        if (did_alloc)
-            RADIX_THREAD_free(rt);
-
-        return 0;
-    }
-
-    return 1;
-}
-
-static int bindings_thread_init(void)
-{
-    return bindings_thread_init_with(NULL);
-}
-
-static void bindings_thread_cleanup(void)
+static void radix_thread_cleanup(void)
 {
     RADIX_THREAD *rt = radix_get_thread();
 
@@ -389,18 +371,39 @@ static void bindings_thread_cleanup(void)
 
     if (!TEST_true(CRYPTO_THREAD_set_local(&radix_thread, NULL)))
         return;
-
-    RADIX_THREAD_free(rt);
 }
 
-static int bindings_join_all_threads(int *testresult)
+static int bindings_process_init(size_t node_idx, size_t process_idx)
 {
-    return RADIX_PROCESS_join_all_threads(&radix_process, testresult);
+    RADIX_THREAD *rt;
+
+    if (!TEST_true(RADIX_PROCESS_init(&radix_process, node_idx, process_idx)))
+        return 0;
+
+    if (!TEST_true(CRYPTO_THREAD_init_local(&radix_thread,
+                                            radix_thread_cleanup_tl)))
+        return 0;
+
+    if (!TEST_ptr(rt = RADIX_THREAD_new(&radix_process)))
+        return 0;
+
+    /* Allocate structures for main thread. */
+    return radix_thread_init(rt);
 }
 
-static void bindings_process_cleanup(void)
+static int bindings_process_finish(void)
 {
+    int testresult;
+
+    if (!TEST_true(RADIX_PROCESS_join_all_threads(&radix_process, &testresult)))
+        return 0;
+
+    if (!TEST_true(testresult))
+        return 0;
+
+    radix_thread_cleanup(); /* cleanup main thread */
     RADIX_PROCESS_cleanup(&radix_process);
+    return 1;
 }
 
 #define RP()    (&radix_process)
@@ -441,7 +444,7 @@ static unsigned int RADIX_THREAD_worker_main(void *p)
     int testresult = 0;
     RADIX_THREAD *rt = p;
 
-    if (!TEST_true(bindings_thread_init_with(rt)))
+    if (!TEST_true(radix_thread_init(rt)))
         return 0;
 
     /* Wait until thread-specific init is done (e.g. setting rt->t) */
@@ -455,7 +458,7 @@ static unsigned int RADIX_THREAD_worker_main(void *p)
     rt->done        = 1;
     ossl_crypto_mutex_unlock(rt->m);
 
-    bindings_thread_cleanup();
+    radix_thread_cleanup();
     return 1;
 }
 
@@ -492,3 +495,6 @@ DEF_FUNC(hf_spawn_thread)
 err:
     return ok;
 }
+
+#define OP_SPAWN_THREAD(script_name) \
+    OP_PUSH_P(SCRIPT(script_name)); OP_FUNC(hf_spawn_thread)

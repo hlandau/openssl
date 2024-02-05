@@ -502,6 +502,10 @@ static void TERP_cleanup(TERP *terp)
 {
     if (terp->script_info == NULL)
         return;
+
+    OPENSSL_free(terp->stk_beg);
+    terp->stk_beg = terp->stk_cur = terp->stk_end = NULL;
+    terp->script_info = NULL;
 }
 
 static int TERP_stk_ensure_capacity(TERP *terp, size_t spare)
@@ -730,3 +734,6 @@ err:
                       ok ? "completed" : "failed, exiting");
     return ok;
 }
+
+#define SCRIPT(name)    (&script_info_##name)
+#define USE(name)       SCRIPT(name),

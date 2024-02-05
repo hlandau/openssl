@@ -37,12 +37,20 @@ DEF_SCRIPT(simple_conn, "simple connection to server")
     OP_FUNC(some_helper);
 }
 
+DEF_SCRIPT(simple_thread_child, "threaded test (child)")
+{
+}
+
+DEF_SCRIPT(simple_thread, "threaded test")
+{
+    OP_SPAWN_THREAD(simple_thread_child);
+}
+
 /*
  * List of Test Scripts
  * ============================================================================
  */
-#define USE(name) &script_info_##name,
-
 static SCRIPT_INFO *const scripts[] = {
     USE(simple_conn)
+    USE(simple_thread)
 };
