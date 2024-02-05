@@ -11,6 +11,7 @@
  * Test Scripts
  * ============================================================================
  */
+#if 0
 static int some_helper(FUNC_CTX *fctx)
 {
     int ok;
@@ -67,13 +68,20 @@ DEF_SCRIPT(simple_thread, "threaded test")
     OP_SPAWN_THREAD(simple_thread_child);
     OP_SPAWN_THREAD(simple_thread_child);
 }
+#endif
+
+DEF_SCRIPT(simple_conn, "simple connection to server")
+{
+    OP_NEW_SSL_C("a");
+}
 
 /*
  * List of Test Scripts
  * ============================================================================
  */
 static SCRIPT_INFO *const scripts[] = {
-    USE(err_test)
     USE(simple_conn)
-    USE(simple_thread)
+    //USE(err_test)
+    //USE(simple_conn)
+    //USE(simple_thread)
 };

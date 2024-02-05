@@ -15,12 +15,20 @@ DEF_FUNC(hf_new_ssl)
 {
     int ok = 0;
     const char *name;
+    SSL_CTX *ctx;
     SSL *ssl;
+    uint64_t flags;
 
-    F_POP(name);
+    F_POP2(name, flags);
 
-    if (!TEST_ptr(ssl = SSL_new(NULL /* TODO */)))
+    /* TODO(QUIC SERVER): Allow this to create a server context. */
+    if (!TEST_ptr(ctx = SSL_CTX_new(OSSL_QUIC_client_method())))
         goto err;
+
+    if (!TEST_ptr(ssl = SSL_new(ctx)))
+        goto err;
+
+    SSL_CTX_free(ctx);
 
     if (!TEST_true(RADIX_PROCESS_set_ssl(RP(), name, ssl))) {
         SSL_free(ssl);
@@ -625,8 +633,8 @@ err:
 
 #define OP_UNBIND(name) \
     OP_PUSH_P(name) OP_FUNC(hf_unbind)
-#define OP_NEW_SSL(name) \
-    OP_PUSH_P(name) OP_FUNC(hf_new_ssl)
+#define OP_NEW_SSL_C(name) \
+    OP_PUSH_P(name); OP_PUSH_U64(0); OP_FUNC(hf_new_ssl)
 #define OP_NEW_STREAM(conn_name, stream_name, flags) \
     OP_PUSH_P(conn_name) OP_PUSH_P(stream_name) \
     OP_PUSH_U64(flags) OP_PUSH_U64(0) OP_FUNC(hf_new_stream)

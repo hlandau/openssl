@@ -12,6 +12,7 @@
 #include "internal/quic_engine.h"
 #include "internal/quic_channel.h"
 #include "internal/quic_ssl.h"
+#include "internal/quic_error.h"
 
 /*
  * RADIX 6D QUIC Test Framework
@@ -180,11 +181,112 @@ err:
     return 0;
 }
 
+static const char *stream_state_to_str(int state)
+{
+    switch (state) {
+    case SSL_STREAM_STATE_NONE:
+        return "none";
+    case SSL_STREAM_STATE_OK:
+        return "OK";
+    case SSL_STREAM_STATE_WRONG_DIR:
+        return "wrong dir";
+    case SSL_STREAM_STATE_FINISHED:
+        return "finished";
+    case SSL_STREAM_STATE_RESET_LOCAL:
+        return "reset-local";
+    case SSL_STREAM_STATE_RESET_REMOTE:
+        return "reset-remote";
+    case SSL_STREAM_STATE_CONN_CLOSED:
+        return "conn-closed";
+    default:
+        return "?";
+    }
+}
+
+static void report_ssl_state(BIO *bio, const char *pfx, int is_write,
+                             int state, uint64_t ec)
+{
+    const char *state_s = stream_state_to_str(state);
+
+    BIO_printf(bio, "%s%-15s%s(%d)", pfx, is_write ? "Write state: " : "Read state: ",
+        state_s, state);
+    if (ec != UINT64_MAX)
+        BIO_printf(bio, ", %llu", (unsigned long long)ec);
+    BIO_printf(bio, "\n");
+}
+
+static void report_ssl(SSL *ssl, BIO *bio, const char *pfx)
+{
+    const char *type = "SSL";
+    int is_quic = SSL_is_quic(ssl), is_conn = 0;
+    SSL_CONN_CLOSE_INFO cc_info = {0};
+    const char *e_str, *f_str;
+
+    if (is_quic) {
+        is_conn = SSL_is_connection(ssl);
+
+        if (is_conn)
+            type = "QCSO";
+        else
+            type = "QSSO";
+    }
+
+    BIO_printf(bio, "%sType:          %s\n", pfx, type);
+
+    if (is_quic && is_conn
+        && SSL_get_conn_close_info(ssl, &cc_info, sizeof(cc_info))) {
+
+        e_str = ossl_quic_err_to_string(cc_info.error_code);
+        f_str = ossl_quic_frame_type_to_string(cc_info.frame_type);
+
+        if (e_str == NULL)
+            e_str = "?";
+        if (f_str == NULL)
+            f_str = "?";
+
+        BIO_printf(bio, "%sConnection is closed: %s(%llu)/%s(%llu), "
+                   "%s, %s, reason: \"%s\"",
+                   pfx,
+                   e_str,
+                   (unsigned long long)cc_info.error_code,
+                   f_str,
+                   (unsigned long long)cc_info.frame_type,
+                   (cc_info.flags & SSL_CONN_CLOSE_FLAG_LOCAL) != 0
+                     ? "local" : "remote",
+                   (cc_info.flags & SSL_CONN_CLOSE_FLAG_TRANSPORT) != 0
+                     ? "transport" : "app",
+                   cc_info.reason != NULL ? cc_info.reason : "-");
+    }
+
+    if (is_quic) {
+        uint64_t stream_id = SSL_get_stream_id(ssl), rec, wec;
+        int rstate, wstate;
+
+        if (stream_id != UINT64_MAX)
+            BIO_printf(bio, "%sStream ID: %llu\n", pfx,
+                       (unsigned long long)stream_id);
+
+        rstate = SSL_get_stream_read_state(ssl);
+        wstate = SSL_get_stream_write_state(ssl);
+
+        if (SSL_get_stream_read_error_code(ssl, &rec) != 1)
+            rec = UINT64_MAX;
+
+        if (SSL_get_stream_write_error_code(ssl, &wec) != 1)
+            wec = UINT64_MAX;
+
+        report_ssl_state(bio, pfx, 0, rstate, rec);
+        report_ssl_state(bio, pfx, 1, wstate, wec);
+    }
+}
+
 static void report_obj(RADIX_OBJ *obj, void *arg)
 {
     BIO *bio = arg;
-    BIO_printf(bio, "    NAME: '%s'\n", obj->name);
-    BIO_printf(bio, "    SSL:  %p\n\n", (void *)obj->ssl);
+    SSL *ssl = obj->ssl;
+
+    BIO_printf(bio, "      - %-16s @ %p\n", obj->name, (void *)obj->ssl);
+    report_ssl(ssl, bio, "          ");
 }
 
 static void RADIX_THREAD_report_state(RADIX_THREAD *rt, BIO *bio)

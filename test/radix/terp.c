@@ -191,7 +191,7 @@ ossl_unused static void opgen_FUNC(GEN_CTX *ctx, helper_func_t f,
     openc_p(ctx, (void *)f_name);
 }
 
-static void opgen_LABEL(GEN_CTX *ctx, const char *name)
+ossl_unused static void opgen_LABEL(GEN_CTX *ctx, const char *name)
 {
     openc_opcode(ctx, OPK_LABEL);
     openc_p(ctx, (void *)name);

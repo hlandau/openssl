@@ -35,7 +35,7 @@ static int test_script(int idx)
 
     testresult = TERP_run(script_info, &cfg);
 
-    if (bindings_process_finish(testresult))
+    if (!bindings_process_finish(testresult))
         testresult = 0;
 
     return testresult;
